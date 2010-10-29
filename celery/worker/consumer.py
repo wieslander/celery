@@ -81,6 +81,7 @@ from celery.exceptions import NotRegistered
 from celery.utils import noop
 from celery.utils.timer2 import to_timestamp
 from celery.worker import state
+from celery.worker.gossip import Gossip
 from celery.worker.job import TaskRequest, InvalidTaskError
 from celery.worker.control.registry import Panel
 from celery.worker.heartbeat import Heart
@@ -246,6 +247,7 @@ class Consumer(object):
         self.logger.debug("Consumer: Starting message consumer...")
         self.task_consumer.consume()
         self.broadcast_consumer.consume()
+        self.gossip_consumer.consume()
         wait_for_message = self._mainloop().next
         self.logger.debug("Consumer: Ready to accept tasks!")
 
@@ -367,6 +369,8 @@ class Consumer(object):
 
         if self.broadcast_consumer:
             self.broadcast_consumer.channel.close()
+        if self.gossip_consumer:
+            self.gossip_consumer.channel.close()
 
         if close:
             self.close_connection()
@@ -409,6 +413,11 @@ class Consumer(object):
         self.pidbox_node.channel = self.connection.channel()
         self.broadcast_consumer = self.pidbox_node.listen(
                                         callback=self.on_control)
+
+        self.gossip = Gossip(self.connection, hostname=self.hostname,
+                                              logger=self.logger,
+                                              app=self.app)
+        self.gossip_consumer = self.gossip.Consumer()
 
         # Flush events sent while connection was down.
         if self.event_dispatcher:
