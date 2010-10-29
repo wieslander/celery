@@ -431,7 +431,11 @@ class Consumer(object):
         self._state = RUN
 
     def restart_heartbeat(self):
-        self.heart = Heart(self.event_dispatcher)
+        self.heart = Heart(self.event_dispatcher, info={
+            "concurrency": self.pool.limit,
+            "active_requests": len(state.active_requests),
+            "reserved_requests": len(state.reserved_requests),
+            "prefetch_count": self.qos.next})
         self.heart.start()
 
     def _mainloop(self):

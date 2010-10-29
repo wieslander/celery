@@ -21,18 +21,43 @@ class Gossip(object):
     def Consumer(self):
         return self.ev.consumer()
 
+    def node_joins(self, node, event):
+        self.logger.info(
+                "Gossip: %s just moved into the neighboorhood. "
+                "concurrency=%s tasks[active:%s reserved:%s] prefetch_count:%s" % (
+            node.hostname, event["concurrency"],
+            event["active_requests"], event["reserved_requests"],
+            event["prefetch_count"]))
+
+    def node_heartbeat(self, node, event):
+        self.logger.info(
+                "Gossip: %s heartbeat. "
+                "concurrency=%s tasks[active:%s reserved:%s] prefetch_count:%s" % (
+            node.hostname, event["concurrency"],
+            event["active_requests"], event["reserved_requests"],
+            event["prefetch_count"]))
+
+
+    def node_leaves(self, node):
+        self.logger.info("Gossip: %s left" % (node.hostname, ))
+
+    def _to_node(self, event):
+        return self.state.workers[event["hostname"]]
+
     def handle(self, event):
         if event["hostname"] == self.hostname:
             return
         self.state.event(event)
         if event["type"] == "worker-online":
-            node = self.state.workers[event["hostname"]]
-            if node.alive:  # event may be old, so verify heartbeat.
-                self.logger.info("%s just moved into the neighboorhood." % (
-                    node.hostname, ))
-        if event["type"] == "worker-offline":
-            node = self.state.workers[event["hostname"]]
+            node = self._to_node(event)
+            if node.alive:  # event may be old, so verify timestamp.
+                self.node_joins(node, event)
+        elif event["type"] == "worker-offline":
+            node = self._to_node(event)
             if not node.alive:
-                self.logger.warning("%s is offline." % (node.hostname, ))
-        print("STATE: %r" % (self.state.workers, ))
+                self.node_leaves(node)
+        elif event["type"] == "worker-heartbeat":
+            node = self._to_node(event)
+            if not node.alive:
+                self.node_heartbeat(node, event)
 
