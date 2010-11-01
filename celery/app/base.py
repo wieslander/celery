@@ -20,6 +20,51 @@ from celery.utils import noop, isatty
 from celery.utils.functional import wraps
 
 
+class LamportClock(object):
+    """Lamports logical clock.
+
+    From Wikipedia:
+
+    A Lamport logical clock is a monotonically incrementing software counter
+    maintained in each process.  It follows some simple rules:
+
+        * A process increments its counter before each event in that process;
+        * When a process sends a message, it includes its counter value with
+          the message;
+        * On receiving a message, the receiver process sets its counter to be
+          greater than the maximum of its own value and the received value
+          before it considers the message received.
+
+    Conceptually, this logical clock can be thought of as a clock that only
+    has meaning in relation to messages moving between processes.  When a
+    process receives a message, it resynchronizes its logical clock with
+    that sender.
+
+    .. seealso::
+
+        http://en.wikipedia.org/wiki/Lamport_timestamps
+        http://en.wikipedia.org/wiki/Lamport's_Distributed_
+            Mutual_Exclusion_Algorithm
+
+
+    *Usage*
+
+    When sending a message use :meth:`tick` to increment the clock,
+    when receiving a message use :meth:`sync` to sync with
+    the lamport timestamp of the message.
+
+    """
+    value = 0
+
+    def sync(self, other):
+        if other > self.value:
+            self.value = other
+
+    def tick(self):
+        self.value += 1
+        return self.value
+
+
 class BaseApp(object):
     """Base class for apps."""
     SYSTEM = _platform.system()
@@ -38,6 +83,7 @@ class BaseApp(object):
         self._loader = None
         self._log = None
         self.set_as_current = set_as_current
+        self.clock = LamportClock()
         self.on_init()
 
     def on_init(self):

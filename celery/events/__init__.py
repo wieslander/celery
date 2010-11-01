@@ -13,10 +13,12 @@ from celery.utils import gen_unique_id
 
 event_exchange = Exchange("celeryev", type="topic")
 
+
+
 def create_event(type, fields):
-    std = {"type": type,
-           "timestamp": fields.get("timestamp") or time.time()}
-    return dict(fields, **std)
+    return dict(fields,
+                type=type,
+                timestamp=fields.get("timestamp") or time.time())
 
 
 def Event(type, **fields):
@@ -79,7 +81,10 @@ class EventDispatcher(object):
             return
 
         self._lock.acquire()
-        event = Event(type, hostname=self.hostname, **fields)
+        event = Event(type,
+                      hostname=self.hostname,
+                      clock=self.app.clock.tick(),
+                      **fields)
         try:
             try:
                 self.publisher.publish(event,
@@ -113,8 +118,7 @@ class EventReceiver(object):
     """
     handlers = {}
 
-    def __init__(self, connection, handlers=None, routing_key="#",
-            app=None):
+    def __init__(self, connection, handlers=None, routing_key="#", app=None):
         self.app = app_or_default(app)
         self.connection = connection
         if handlers is not None:
@@ -175,4 +179,7 @@ class EventReceiver(object):
 
     def _receive(self, message_data, message):
         type = message_data.pop("type").lower()
+        tock = message_data.get("clock")
+        if tock:
+            self.app.clock.sync(tock)
         self.process(type, create_event(type, message_data))
