@@ -26,15 +26,18 @@ class Worker(Element):
 
     def __init__(self, **fields):
         super(Worker, self).__init__(**fields)
+        self.stats = {}
         self.heartbeats = []
 
     def on_online(self, timestamp=None, **kwargs):
+        self.stats = kwargs.get("stats", {})
         self._heartpush(timestamp)
 
     def on_offline(self, **kwargs):
         self.heartbeats = []
 
     def on_heartbeat(self, timestamp=None, **kwargs):
+        self.stats = kwargs.get("stats", {})
         self._heartpush(timestamp)
 
     def _heartpush(self, timestamp):

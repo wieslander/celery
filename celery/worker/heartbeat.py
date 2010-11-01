@@ -13,12 +13,12 @@ class Heart(threading.Thread):
     """
 
     #: Beats per minute.
-    bpm = 0.5
+    bpm = 2.0
 
-    def __init__(self, eventer, interval=None, info=None):
+    def __init__(self, eventer, interval=None, stats=None):
         super(Heart, self).__init__()
         self.eventer = eventer
-        self.info = info or {}
+        self.stats = stats or (lambda: {})
         self.bpm = interval and interval / 60.0 or self.bpm
         self._shutdown = threading.Event()
         self._stopped = threading.Event()
@@ -31,7 +31,7 @@ class Heart(threading.Thread):
         bpm = self.bpm
         dispatch = self.eventer.send
 
-        dispatch("worker-online", **self.info)
+        dispatch("worker-online", stats=self.stats())
 
         # We can't sleep all of the interval, because then
         # it takes 60 seconds (or value of interval) to shutdown
@@ -48,7 +48,7 @@ class Heart(threading.Thread):
 
             if not last_beat or now > last_beat + (60.0 / bpm):
                 last_beat = now
-                dispatch("worker-heartbeat")
+                dispatch("worker-heartbeat", stats=self.stats())
             if self._shutdown.isSet():
                 break
             sleep(1)
