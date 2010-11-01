@@ -13,7 +13,7 @@ class Heart(threading.Thread):
     """
 
     #: Beats per minute.
-    bpm = 2.0
+    bpm = 3.2
 
     def __init__(self, eventer, interval=None, stats=None):
         super(Heart, self).__init__()
