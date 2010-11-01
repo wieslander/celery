@@ -104,6 +104,7 @@ NAMESPACES = {
         "LOG_FILE": Option(),
         "MEDIATOR": Option("celery.worker.controllers.Mediator"),
         "MAX_TASKS_PER_CHILD": Option(type="int"),
+        "NODES": Option({}, type="dict"),
         "POOL": Option("celery.concurrency.processes.TaskPool"),
         "POOL_PUTLOCKS": Option(True, type="bool"),
         "PREFETCH_MULTIPLIER": Option(4, type="int"),

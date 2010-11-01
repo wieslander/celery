@@ -52,34 +52,45 @@ class SSHRestartStrategy(object):
 class Gossip(object):
 
     def __init__(self, connection, hostname=None, logger=None,
-            routing_key="worker.#", app=None):
+            routing_key="worker.#", dispatcher=None,
+            known_nodes=None, app=None):
         self.app = app_or_default(app)
         self.ev = EventReceiver(connection, {"*": self.handle},
                                 routing_key, app)
+        self.known_nodes = known_nodes or self.app.conf.CELERYD_NODES
         self.hostname = hostname or gethostname()
         self.logger = logger or self.app.log.get_default_logger()
+        self.dispatcher = None
         self.state = State()
         self.timer = Timer()
         self.timers = defaultdict(lambda: None)
+        self.rx_replies = {}
 
     def Consumer(self):
         return self.ev.consumer()
 
-    def _update_timer(node):
+    def try_restart(self, node):
+        info = self.known_nodes.get(node.hostname) or {}
+        restart_strategy = info.get("restart")
+        if restart_strategy:
+            self.dispatcher.send("worker-rx", patient=node.hostname)
+            self.rx_replies[node.hostname] = []
+
+    def _update_timer(self, node):
         old_timer = self.timers[node.hostname]
         if old_timer:
             old_timer.cancel()
-        self.timers[node.hostname] = self.timer.apply_interval(40,
+        self.timers[node.hostname] = self.timer.apply_interval(40000,
                 self._verify_node, (node, ))
 
     def node_joins(self, node):
+        self._update_timer(node)
         self.logger.info(
                 "Gossip: %s just moved into the neighboorhood. stats: %r" % (
                     node.hostname, node.stats))
 
     def node_heartbeat(self, node):
-        self.timers[node.hostname] = self.timer.apply_interval(40,
-                self._verify_node, (node, ))
+        self._update_timer(node)
         stats = node.stats
         self.logger.info(
                 "Gossip: %s heartbeat: stats:%r" % (node.hostname,
@@ -87,6 +98,7 @@ class Gossip(object):
 
     def node_leaves(self, node):
         self.logger.info("Gossip: %s left" % (node.hostname, ))
+        self.try_restart(node)
 
     def _to_node(self, event):
         return self.state.workers[event["hostname"]]
@@ -96,6 +108,8 @@ class Gossip(object):
         if not node.alive:
             self.node_leaves(node)
             self.timers[node.hostname].cancel()
+            self.state.workers.pop(node.hostname, None)
+        print("RETURNED")
 
     def handle(self, event):
         if event["hostname"] == self.hostname:
@@ -117,3 +131,29 @@ class Gossip(object):
             node = self._to_node(event)
             if node.alive:
                 self.node_heartbeat(node)
+        elif event["type"] == "worker-rx":
+            patient = event["patient"]
+            self.dispatcher.send("worker-rx-ack", patient=event["patient"])
+            if patient in self.rx_requests:
+                heapq.heappush(self.rx_requests[patient], (event["timestamp"],
+                                                           event["hostname"]))
+            else:
+                self.rx_requests[patient] = [(event["timestamp"],
+                                              event["hostname"])]
+        elif event["type"] == "worker-rx-ack":
+            patient = event["patient"]
+            alive_nodes = self.state.alive_workers()
+            if patient in alive_workers:
+                return self.rx_replies.pop(patient, None)
+            try:
+                rx_replies = self.rx_replies[patient]
+            except KeyError:
+                return
+
+            rx_replies.append(event["hostname"])
+            if len(rx_replies) == len(alive_nodes):
+                print("GOT ENOUGH REPLIES TO RESTART")
+                self.timer.apply_after(10000, self._restart_node, (node, ))
+
+        def _restart_node(self, node):
+            print("ACTUALLY RESTART NODE: %r" % (node, ))
