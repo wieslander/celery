@@ -198,10 +198,8 @@ class Timer(Thread):
             self.start()
 
     def enter(self, entry, eta, priority=None):
-        print("ENTER: %r" % (entry, ))
         self.ensure_started()
         self.mutex.acquire()
-        print("MUTEX SUCCESSFULLY ACQUIRED")
         try:
             entry = self.schedule.enter(entry, eta, priority)
             self.not_empty.notify()
@@ -224,7 +222,6 @@ class Timer(Thread):
 
         def _reschedules(*args, **kwargs):
             try:
-                print("RESCHEDULES")
                 return fun(*args, **kwargs)
             finally:
                 if not tref.cancelled:
