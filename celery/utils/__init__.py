@@ -2,9 +2,11 @@ from __future__ import generators
 
 import os
 import sys
-import operator
 import importlib
 import logging
+import operator
+import paramiko
+import subprocess
 
 from inspect import getargspec
 from itertools import islice
@@ -17,6 +19,41 @@ from celery.utils.functional import partial
 LOG_LEVELS = dict(logging._levelNames)
 LOG_LEVELS["FATAL"] = logging.FATAL
 LOG_LEVELS[logging.FATAL] = "FATAL"
+
+
+class RestartStrategy(object):
+
+    def __init__(self, argv, **options):
+        self.argv = argv
+        self.options = options
+
+    def __call__(self):
+        return subprocess.call(self.argv, **self.options) == 0
+
+
+class SSHRestartStrategy(object):
+
+    def __init__(self, username, host, argv, password=None):
+        self.username = username
+        self.password = password
+        self.host = host
+        self.argv = argv
+
+    def __call__(self):
+        client = self.connect()
+        stdin, stdout, stderr = client.exec_command(self.argv)
+
+    def connect(self):
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(self.host,
+                       username=self.username,
+                       password=self.password)
+
+
+
+
+
 
 
 class promise(object):
