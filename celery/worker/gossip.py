@@ -1,6 +1,5 @@
+import heapq
 import os
-import paramiko
-import subprocess
 
 from socket import gethostname
 from threading import Thread
@@ -13,58 +12,31 @@ from celery.utils.compat import defaultdict
 from celery.utils.timer2 import Timer
 
 
-class RestartStrategy(object):
-
-    def __init__(self, argv):
-        self.argv = argv
-
-    def __call__(self):
-        return subprocess.call(self.argv) == 0
-
-
-class SSHRestartStrategy(object):
-
-    def __init__(self, username, host, argv, password=None):
-        self.username = username
-        self.password = password
-        self.host = host
-        self.argv = argv
-
-    def __call__(self):
-        client = self.connect()
-        stdin, stdout, stderr = client.exec_command(self.argv)
-
-    def connect(self):
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(self.host,
-                       username=self.username,
-                       password=self.password)
-
-
-
-
-
-
-
-
-
 class Gossip(object):
 
     def __init__(self, connection, hostname=None, logger=None,
-            routing_key="worker.#", dispatcher=None,
-            known_nodes=None, app=None):
+                 routing_key="worker.#", dispatcher=None,
+                 known_nodes=None, app=None):
         self.app = app_or_default(app)
         self.ev = EventReceiver(connection, {"*": self.handle},
                                 routing_key, app)
         self.known_nodes = known_nodes or self.app.conf.CELERYD_NODES
         self.hostname = hostname or gethostname()
         self.logger = logger or self.app.log.get_default_logger()
-        self.dispatcher = None
+        self.dispatcher = dispatcher
         self.state = State()
         self.timer = Timer()
         self.timers = defaultdict(lambda: None)
         self.rx_replies = {}
+        self.rx_requests = {}
+        self.event_handlers = {
+            "worker-online": self.on_worker_online,
+            "worker-offline": self.on_worker_offline,
+            "worker-heartbeat": self.on_worker_heartbeat,
+            "worker-rx": self.on_worker_rx,
+            "worker-rx-ack": self.on_worker_rx_ack,
+        }
+
 
     def Consumer(self):
         return self.ev.consumer()
@@ -80,7 +52,7 @@ class Gossip(object):
         old_timer = self.timers[node.hostname]
         if old_timer:
             old_timer.cancel()
-        self.timers[node.hostname] = self.timer.apply_interval(40000,
+        self.timers[node.hostname] = self.timer.apply_interval(5000,
                 self._verify_node, (node, ))
 
     def node_joins(self, node):
@@ -109,51 +81,73 @@ class Gossip(object):
             self.node_leaves(node)
             self.timers[node.hostname].cancel()
             self.state.workers.pop(node.hostname, None)
-        print("RETURNED")
 
     def handle(self, event):
-        if event["hostname"] == self.hostname:
-            return
-        joins = False
-        if event["type"] == "worker-heartbeat" and \
-                event["hostname"] not in self.state.workers:
-                    joins = True
+        print("EVENT: %r" % (event, ))
         self.state.event(event)
-        if joins or event["type"] == "worker-online":
+        handler = self.event_handlers.get(event["type"])
+        if handler:
+            handler(event)
+
+    def on_worker_online(self, event):
+        if event["hostname"] != self.hostname:
             node = self._to_node(event)
             if node.alive:  # event may be old, so verify timestamp.
                 self.node_joins(node)
-        elif event["type"] == "worker-offline":
+
+    def on_worker_offline(self, event):
+        if event["hostname"] != self.hostname:
             node = self._to_node(event)
             if not node.alive:
                 self.node_leaves(node)
-        elif event["type"] == "worker-heartbeat":
+
+    def on_worker_heartbeat(self, event):
+        if event["hostname"] != self.hostname:
             node = self._to_node(event)
             if node.alive:
-                self.node_heartbeat(node)
-        elif event["type"] == "worker-rx":
-            patient = event["patient"]
-            self.dispatcher.send("worker-rx-ack", patient=event["patient"])
-            if patient in self.rx_requests:
-                heapq.heappush(self.rx_requests[patient], (event["timestamp"],
-                                                           event["hostname"]))
+                if node.hostname not in self.state.workers:
+                    self.node_joins(node)
+                else:
+                    self.node_heartbeat(node)
+
+    def on_worker_rx(self, event):
+        patient = event["patient"]
+        self.dispatcher.send("worker-rx-ack", patient=event["patient"])
+        pos = event["clock"], event["hostname"]
+        if patient in self.rx_requests:
+            heapq.heappush(self.rx_requests[patient], pos)
+        else:
+            self.rx_requests[patient] = [pos]
+
+    def on_worker_rx_ack(self, event):
+        patient = event["patient"]
+        alive_workers = self.state.alive_workers()
+
+        if patient in alive_workers:
+            return self.rx_replies.pop(patient, None)
+
+        try:
+            rx_replies = self.rx_replies[patient]
+        except KeyError:
+            return
+        rx_replies.append(event["hostname"])
+
+        if len(rx_replies) == len(alive_workers):
+            leader = self.rx_requests[patient][0][1]
+            if leader == self.hostname:
+                print("Won the race to restart node %s" % (patient, ))
+                self.timer.apply_after(2000,
+                                       self._restart_node, (patient, ))
             else:
-                self.rx_requests[patient] = [(event["timestamp"],
-                                              event["hostname"])]
-        elif event["type"] == "worker-rx-ack":
-            patient = event["patient"]
-            alive_nodes = self.state.alive_workers()
-            if patient in alive_workers:
-                return self.rx_replies.pop(patient, None)
-            try:
-                rx_replies = self.rx_replies[patient]
-            except KeyError:
-                return
+                print("Node %s elected to restart %s" % (leader, patient))
+            self.rx_replies.pop(patient, None)
 
-            rx_replies.append(event["hostname"])
-            if len(rx_replies) == len(alive_nodes):
-                print("GOT ENOUGH REPLIES TO RESTART")
-                self.timer.apply_after(10000, self._restart_node, (node, ))
-
-        def _restart_node(self, node):
-            print("ACTUALLY RESTART NODE: %r" % (node, ))
+    def _restart_node(self, hostname):
+        try:
+            strategy = self.known_nodes[hostname]["restart"]
+        except KeyError:
+            self.logger.error(
+                    "Restart strategy for %r suddenly missing" % (hostname, ))
+        print("RESTARTING NODE: %r using restart strategy %r" % (hostname,
+                                                                 strategy))
+        strategy()

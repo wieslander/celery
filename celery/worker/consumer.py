@@ -414,12 +414,6 @@ class Consumer(object):
         self.broadcast_consumer = self.pidbox_node.listen(
                                         callback=self.on_control)
 
-        self.gossip = Gossip(self.connection, hostname=self.hostname,
-                                              logger=self.logger,
-                                              dispatcher=self.event_dispatcher,
-                                              app=self.app)
-        self.gossip_consumer = self.gossip.Consumer()
-
         # Flush events sent while connection was down.
         if self.event_dispatcher:
             self.event_dispatcher.flush()
@@ -428,6 +422,12 @@ class Consumer(object):
                                                 hostname=self.hostname,
                                                 enabled=self.send_events)
         self.restart_heartbeat()
+        self.gossip = Gossip(self.connection, hostname=self.hostname,
+                                              logger=self.logger,
+                                              dispatcher=self.event_dispatcher,
+                                              app=self.app)
+        self.gossip_consumer = self.gossip.Consumer()
+
 
         self._state = RUN
 
