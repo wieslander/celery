@@ -160,7 +160,7 @@ class Consumer(object):
 
     .. attribute:: send_events
 
-        Is events enabled?
+        Is task events enabled?
 
     .. attribute:: init_callback
 
@@ -417,10 +417,12 @@ class Consumer(object):
         # Flush events sent while connection was down.
         if self.event_dispatcher:
             self.event_dispatcher.flush()
+        domains = not self.send_events and ["worker"] or None
         self.event_dispatcher = EventDispatcher(self.connection,
                                                 app=self.app,
                                                 hostname=self.hostname,
-                                                enabled=self.send_events)
+                                                enabled=True,
+                                                domains=domains)
         self.restart_heartbeat()
         self.gossip = Gossip(self.connection, hostname=self.hostname,
                                               logger=self.logger,

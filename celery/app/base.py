@@ -49,18 +49,22 @@ class LamportClock(object):
 
     *Usage*
 
-    When sending a message use :meth:`tick` to increment the clock,
-    when receiving a message use :meth:`sync` to sync with
-    the lamport timestamp of the message.
+    When sending a message use :meth:`forward` to increment the clock,
+    when receiving a message use :meth:`adjust` to sync with
+    the Lamport timestamp of the message.
 
     """
+
+    #: The clocks current value.
     value = 0
 
-    def sync(self, other):
-        if other > self.value:
-            self.value = other
+    def __init__(self, initial_value=0):
+        self.value = initial_value
 
-    def tick(self):
+    def adjust(self, other):
+        self.value = max(self.value, other) + 1
+
+    def forward(self):
         self.value += 1
         return self.value
 

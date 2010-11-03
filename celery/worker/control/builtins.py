@@ -21,23 +21,21 @@ def revoke(panel, task_id, **kwargs):
 @Panel.register
 def enable_events(panel):
     dispatcher = panel.consumer.event_dispatcher
-    if not dispatcher.enabled:
-        dispatcher.enable()
-        dispatcher.send("worker-online")
-        panel.logger.warn("Events enabled by remote.")
-        return {"ok": "events enabled"}
-    return {"ok": "events already enabled"}
+    if "task" not in dispatcher.domains:
+        dispatcher.domains.add("task")
+        panel.logger.warn("Task events enabled by remote.")
+        return {"ok": "task events enabled"}
+    return {"ok": "task events already enabled"}
 
 
 @Panel.register
 def disable_events(panel):
     dispatcher = panel.consumer.event_dispatcher
-    if dispatcher.enabled:
-        dispatcher.send("worker-offline")
-        dispatcher.disable()
-        panel.logger.warn("Events disabled by remote.")
-        return {"ok": "events disabled"}
-    return {"ok": "events already disabled"}
+    if "task" in dispatcher.domains:
+        dispatcher.domains.discard("task")
+        panel.logger.warn("Task events disabled by remote.")
+        return {"ok": "task events disabled"}
+    return {"ok": "task events already disabled"}
 
 
 @Panel.register

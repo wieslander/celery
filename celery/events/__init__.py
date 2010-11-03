@@ -36,16 +36,19 @@ class EventDispatcher(object):
     :param connection: Connection to the broker.
 
     :keyword hostname: Hostname to identify ourselves as,
-        by default uses the hostname returned by :func:`socket.gethostname`.
-
+                       by default uses the hostname returned by :func:`socket.gethostname`.
     :keyword enabled: Set to :const:`False` to not actually publish any events,
-        making :meth:`send` a noop operation.
+                      making :meth:`send` a noop operation.
+    :keyword domains: List of domains to send events for.  :meth:`send` will
+                      ignore send requests to domains not in this list.
+                      If this is :const:`None`, all events will be sent.
 
     You need to :meth:`close` this after use.
 
     """
 
-    def __init__(self, connection, hostname=None, enabled=True, app=None):
+    def __init__(self, connection, hostname=None, enabled=True,
+            domains=None, app=None):
         self.app = app_or_default(app)
         self.connection = connection
         self.hostname = hostname or socket.gethostname()
@@ -53,6 +56,7 @@ class EventDispatcher(object):
         self._lock = threading.Lock()
         self.publisher = None
         self._outbound_buffer = deque()
+        self.domains = set(domains)
 
         if self.enabled:
             self.enable()
@@ -80,15 +84,19 @@ class EventDispatcher(object):
         if not self.enabled:
             return
 
+        domain, subtype = type.split("-", 1)
+        if self.domains is not None and domain not in self.domains:
+            return
+
         self._lock.acquire()
         event = Event(type,
                       hostname=self.hostname,
-                      clock=self.app.clock.tick(),
+                      clock=self.app.clock.forward(),
                       **fields)
+        routing_key = "%s.%s" % (domain, subtype)
         try:
             try:
-                self.publisher.publish(event,
-                                       routing_key=type.replace("-", "."))
+                self.publisher.publish(event, routing_key=routing_key)
             except Exception, exc:
                 self._outbound_buffer.append((event, exc))
         finally:
@@ -179,7 +187,7 @@ class EventReceiver(object):
 
     def _receive(self, message_data, message):
         type = message_data.pop("type").lower()
-        tock = message_data.get("clock")
-        if tock:
-            self.app.clock.sync(tock)
+        clock = message_data.get("clock")
+        if clock:
+            self.app.clock.adjust(clock)
         self.process(type, create_event(type, message_data))
