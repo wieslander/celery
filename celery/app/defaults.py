@@ -64,6 +64,8 @@ NAMESPACES = {
         "CACHE_BACKEND": Option(),
         "CACHE_BACKEND_OPTIONS": Option({}, type="dict"),
         "CREATE_MISSING_QUEUES": Option(True, type="bool"),
+        "DEBUG_LEAK": Option(False, type="bool"),
+        "DEBUG_LEAK_MAX_HISTORY": Option(1000, type="int"),
         "DEFAULT_RATE_LIMIT": Option(type="string"),
         "DISABLE_RATE_LIMITS": Option(False, type="bool"),
         "DEFAULT_ROUTING_KEY": Option("celery"),

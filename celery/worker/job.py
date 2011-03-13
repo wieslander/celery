@@ -19,6 +19,7 @@ from celery.utils import truncate_text
 from celery.utils.compat import log_with_extra
 from celery.utils.encoding import safe_repr, safe_str
 from celery.utils.timeutils import maybe_iso8601
+from celery.utils.compat import defaultdict
 from celery.worker import state
 
 # pep8.py borks on a inline signature separator and
@@ -465,6 +466,15 @@ class TaskRequest(object):
                 "name": self.task_name,
                 "return_value": self.repr_result(ret_value),
                 "runtime": runtime})
+        if self.app.conf.CELERY_DEBUG_LEAK:
+            from psutil import Process
+            from collections import deque
+            p = Process(self.worker_pid)
+            history = state.process_history.get(str(self.worker_pid))
+            if history is None:
+                history = state.process_history[str(self.worker_pid)] = deque(
+                        maxlen=self.app.conf.CELERY_DEBUG_LEAK_MAX_HISTORY)
+            history.append((self.task_name, p.get_memory_info().rss))
 
     def on_retry(self, exc_info):
         """Handler called if the task should be retried."""

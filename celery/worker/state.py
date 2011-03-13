@@ -32,6 +32,9 @@ total_count = defaultdict(lambda: 0)
 #: the list of currently revoked tasks.  Persistent if statedb set.
 revoked = LimitedSet(maxlen=REVOKES_MAX, expires=REVOKE_EXPIRES)
 
+#: history of process tasks and resident memory size.
+process_history = defaultdict(lambda: [])
+
 
 def task_reserved(request):
     """Updates global state when a task has been reserved."""

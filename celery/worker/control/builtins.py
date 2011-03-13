@@ -14,6 +14,11 @@ TASK_INFO_FIELDS = ("exchange", "routing_key", "rate_limit")
 
 
 @Panel.register
+def process_history(panel):
+    return dict((k, list(v)) for k, v in state.process_history.iteritems())
+
+
+@Panel.register
 def revoke(panel, task_id, terminate=False, signal=None, **kwargs):
     """Revoke task by task id."""
     revoked.add(task_id)
