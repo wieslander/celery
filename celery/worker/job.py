@@ -241,6 +241,7 @@ class TaskRequest(object):
 
     _already_revoked = False
     _terminate_on_ack = None
+    _suspend_on_ack = None
 
     def __init__(self, task_name, task_id, args, kwargs,
             on_ack=noop, retries=0, delivery_info=None, hostname=None,
@@ -401,6 +402,17 @@ class TaskRequest(object):
         else:
             self._terminate_on_ack = (True, pool, signal)
 
+    def suspend(self, pool):
+        if self._suspend_on_ack is not None:
+            return
+        elif self.time_start:
+            return pool.suspend_job(self.worker_pid)
+        else:
+            self._suspend_on_ack = (True, pool)
+
+    def resume(self, pool):
+        return pool.resume_job(self.worker_pid)
+
     def revoked(self):
         """If revoked, skip task and mark state."""
         if self._already_revoked:
@@ -433,6 +445,9 @@ class TaskRequest(object):
         if self._terminate_on_ack is not None:
             _, pool, signal = self._terminate_on_ack
             self.terminate(pool, signal)
+        if self._suspend_on_ack is not None:
+            _, pool = self._terminate_on_ack
+            self.suspend(pool)
 
     def on_timeout(self, soft):
         """Handler called if the task times out."""

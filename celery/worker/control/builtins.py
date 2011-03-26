@@ -13,6 +13,13 @@ from celery.utils.encoding import safe_repr
 TASK_INFO_FIELDS = ("exchange", "routing_key", "rate_limit")
 
 
+def _with_request(task_id, fun):
+    for request in state.active_requests:
+        if request.task_id == task_id:
+            return fun(request)
+    raise KeyError(task_id)
+
+
 @Panel.register
 def revoke(panel, task_id, terminate=False, signal=None, **kwargs):
     """Revoke task by task id."""
@@ -20,14 +27,37 @@ def revoke(panel, task_id, terminate=False, signal=None, **kwargs):
     action = "revoked"
     if terminate:
         signum = get_signal(signal)
-        for request in state.active_requests:
-            if request.task_id == task_id:
-                action = "terminated (%s)" % (signum, )
-                request.terminate(panel.consumer.pool, signal=signum)
-                break
+
+        def do_terminate(request):
+            action = "terminated (%s)" % (signum, )
+            request.terminate(panel.consumer.pool, signal=signum)
+
+        _with_request(task_id, do_terminate)
 
     panel.logger.info("Task %s %s." % (task_id, action))
     return {"ok": "task %s %s" % (task_id, action)}
+
+
+@Panel.register
+def suspend(panel, task_id):
+
+    def do_suspend(request):
+        request.suspend(panel.consumer.pool)
+
+    _with_request(task_id, do_suspend)
+    panel.logger.info("Task %s suspended." % (task_id, ))
+    return True
+
+
+@Panel.register
+def resume(panel, task_id):
+
+    def do_resume(request):
+        request.resume(panel.consumer.pool)
+
+    _with_request(task_id, do_resume)
+    panel.logger.info("Task %s resumed." % (task_id, ))
+    return True
 
 
 @Panel.register

@@ -53,6 +53,17 @@ class TaskPool(BasePool):
     def terminate_job(self, pid, signal=None):
         os.kill(pid, signal or _signal.SIGTERM)
 
+    def suspend_job(self, pid):
+        os.kill(pid, _signal.SIGTSTP)
+        self.grow(1)
+
+    def resume_job(self, pid):
+        os.kill(pid, _signal.SIGCONT)
+        try:
+            self.shrink(1)
+        except ValueError:
+            pass
+
     def grow(self, n=1):
         return self._pool.grow(n)
 

@@ -49,7 +49,15 @@ class BasePool(object):
 
     def terminate_job(self, pid):
         raise NotImplementedError(
-                "%s does not implement kill_job" % (self.__class__, ))
+                "%s does not implement terminate_job" % (self.__class__, ))
+
+    def suspend_job(self, pid):
+        raise NotImplementedError(
+                "%s does not implement suspend_job" % (self.__class__, ))
+
+    def resume_job(self, pid):
+        raise NotImplementedError(
+                "%s does not implement resume_job" % (self.__class__, ))
 
     def stop(self):
         self._state = self.CLOSE
