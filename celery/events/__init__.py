@@ -64,7 +64,9 @@ class EventDispatcher(object):
         self.mutex = threading.Lock()
         self.publisher = None
         self._outbound_buffer = deque()
-        self.domains = set(domains)
+        if domains is not None:
+            domains = set(domains)
+        self.domains = domains
         self.serializer = serializer or self.app.conf.CELERY_EVENT_SERIALIZER
 
         self.enabled = enabled
@@ -241,7 +243,7 @@ class Events(object):
                              app=self.app)
 
     def Dispatcher(self, connection=None, hostname=None, enabled=True,
-            channel=None, buffer_while_offline=True):
+            channel=None, buffer_while_offline=True, domains=None):
         return EventDispatcher(connection,
                                hostname=hostname,
                                enabled=enabled,

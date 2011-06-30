@@ -1,6 +1,7 @@
 import heapq
 import os
 
+from collections import defaultdict
 from socket import gethostname
 from threading import Thread
 from time import sleep
@@ -8,7 +9,6 @@ from time import sleep
 from celery.app import app_or_default
 from celery.events import EventReceiver
 from celery.events.state import State
-from celery.utils.compat import defaultdict
 from celery.utils.timer2 import Timer
 
 
@@ -18,8 +18,8 @@ class Gossip(object):
                  routing_key="worker.#", dispatcher=None,
                  known_nodes=None, app=None):
         self.app = app_or_default(app)
-        self.ev = EventReceiver(connection, {"*": self.handle},
-                                routing_key, app)
+        self.ev = self.app.events.Receiver(connection, {"*": self.handle},
+                                           routing_key)
         self.known_nodes = known_nodes or self.app.conf.CELERYD_NODES
         self.hostname = hostname or gethostname()
         self.logger = logger or self.app.log.get_default_logger()
@@ -36,7 +36,6 @@ class Gossip(object):
             "worker-rx": self.on_worker_rx,
             "worker-rx-ack": self.on_worker_rx_ack,
         }
-
 
     def Consumer(self):
         return self.ev.consumer()

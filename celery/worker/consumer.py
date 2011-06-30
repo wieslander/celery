@@ -475,6 +475,8 @@ class Consumer(object):
         self._debug("Cancelling gossip consumer...")
         if self.gossip_consumer:
             self.maybe_conn_error(self.gossip_consumer.cancel)
+        if self.gossip_context:
+            self.maybe_conn_error(self.gossip_context.__exit__())
 
         if close_connection:
             self.close_connection()
@@ -572,7 +574,8 @@ class Consumer(object):
                                               logger=self.logger,
                                               dispatcher=self.event_dispatcher,
                                               app=self.app)
-        self.gossip_consumer = self.gossip.Consumer()
+        self.gossip_context = self.gossip.Consumer()
+        self.gossip_consumer = self.gossip_context.__enter__()
 
 
         # We're back!
@@ -582,7 +585,7 @@ class Consumer(object):
         return {"concurrency": self.pool.limit,
                 "active_requests": len(state.active_requests),
                 "reserved_requests": len(state.reserved_requests),
-                "prefetch_count": self.qos.next}
+                "prefetch_count": self.qos.value}
 
     def restart_heartbeat(self):
         """Restart the heartbeat thread.
