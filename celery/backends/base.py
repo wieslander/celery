@@ -1,16 +1,18 @@
 """celery.backends.base"""
 import time
 
+from datetime import timedelta
+
 from celery import states
 from celery.exceptions import TimeoutError, TaskRevokedError
-from celery.serialization import pickle, get_pickled_exception
-from celery.serialization import get_pickleable_exception
+from celery.utils import timeutils
+from celery.utils.serialization import pickle, get_pickled_exception
+from celery.utils.serialization import get_pickleable_exception
 from celery.datastructures import LocalCache
 
 
 class BaseBackend(object):
-    """The base backend class. All backends should inherit from this."""
-
+    """Base backend class."""
     READY_STATES = states.READY_STATES
     UNREADY_STATES = states.UNREADY_STATES
     EXCEPTION_STATES = states.EXCEPTION_STATES
@@ -21,13 +23,22 @@ class BaseBackend(object):
         from celery.app import app_or_default
         self.app = app_or_default(kwargs.get("app"))
 
+    def prepare_expires(self, value, type=None):
+        if value is None:
+            value = self.app.conf.CELERY_TASK_RESULT_EXPIRES
+        if isinstance(value, timedelta):
+            value = timeutils.timedelta_seconds(value)
+        if value is not None and type:
+            return type(value)
+        return value
+
     def encode_result(self, result, status):
         if status in self.EXCEPTION_STATES:
             return self.prepare_exception(result)
         else:
             return self.prepare_value(result)
 
-    def store_result(self, task_id, result, status):
+    def store_result(self, task_id, result, status, traceback=None):
         """Store the result and status of a task."""
         raise NotImplementedError(
                 "store_result is not supported by this backend.")
@@ -71,7 +82,7 @@ class BaseBackend(object):
         raise NotImplementedError("%s does not implement forget." % (
                     self.__class__))
 
-    def wait_for(self, task_id, timeout=None):
+    def wait_for(self, task_id, timeout=None, propagate=True, interval=0.5):
         """Wait for task and return its result.
 
         If the task raises an exception, this exception
@@ -83,7 +94,6 @@ class BaseBackend(object):
 
         """
 
-        sleep_inbetween = 0.5
         time_elapsed = 0.0
 
         while True:
@@ -91,10 +101,13 @@ class BaseBackend(object):
             if status == states.SUCCESS:
                 return self.get_result(task_id)
             elif status in states.PROPAGATE_STATES:
-                raise self.get_result(task_id)
+                result = self.get_result(task_id)
+                if propagate:
+                    raise result
+                return result
             # avoid hammering the CPU checking status.
-            time.sleep(sleep_inbetween)
-            time_elapsed += sleep_inbetween
+            time.sleep(interval)
+            time_elapsed += interval
             if timeout and time_elapsed >= timeout:
                 raise TimeoutError("The operation timed out.")
 
@@ -132,6 +145,10 @@ class BaseBackend(object):
         raise NotImplementedError(
                 "restore_taskset is not supported by this backend.")
 
+    def delete_taskset(self, taskset_id):
+        raise NotImplementedError(
+                "delete_taskset is not supported by this backend.")
+
     def reload_task_result(self, task_id):
         """Reload task result, even if it has been previously fetched."""
         raise NotImplementedError(
@@ -142,6 +159,17 @@ class BaseBackend(object):
         raise NotImplementedError(
                 "reload_taskset_result is not supported by this backend.")
 
+    def on_chord_part_return(self, task):
+        pass
+
+    def on_chord_apply(self, setid, body, *args, **kwargs):
+        from celery.registry import tasks
+        tasks["celery.chord_unlock"].apply_async((setid, body, ), kwargs,
+                                                 countdown=1)
+
+    def __reduce__(self):
+        return (self.__class__, ())
+
 
 class BaseDictBackend(BaseBackend):
 
@@ -150,14 +178,18 @@ class BaseDictBackend(BaseBackend):
         self._cache = LocalCache(limit=kwargs.get("max_cached_results") or
                                  self.app.conf.CELERY_MAX_CACHED_RESULTS)
 
-    def store_result(self, task_id, result, status, traceback=None):
+    def store_result(self, task_id, result, status, traceback=None, **kwargs):
         """Store task result and status."""
         result = self.encode_result(result, status)
-        return self._store_result(task_id, result, status, traceback)
+        return self._store_result(task_id, result, status, traceback, **kwargs)
 
     def forget(self, task_id):
         self._cache.pop(task_id, None)
         self._forget(task_id)
+
+    def _forget(self, task_id):
+        raise NotImplementedError("%s does not implement forget." % (
+                    self.__class__))
 
     def get_status(self, task_id):
         """Get the status of a task."""
@@ -210,11 +242,20 @@ class BaseDictBackend(BaseBackend):
         """Store the result of an executed taskset."""
         return self._save_taskset(taskset_id, result)
 
+    def delete_taskset(self, taskset_id):
+        self._cache.pop(taskset_id, None)
+        return self._delete_taskset(taskset_id)
+
 
 class KeyValueStoreBackend(BaseDictBackend):
+    task_keyprefix = "celery-task-meta-"
+    taskset_keyprefix = "celery-taskset-meta-"
 
     def get(self, key):
         raise NotImplementedError("Must implement the get method.")
+
+    def mget(self, keys):
+        raise NotImplementedError("Does not support get_many")
 
     def set(self, key, value):
         raise NotImplementedError("Must implement the set method.")
@@ -224,11 +265,53 @@ class KeyValueStoreBackend(BaseDictBackend):
 
     def get_key_for_task(self, task_id):
         """Get the cache key for a task by id."""
-        return "celery-task-meta-%s" % task_id
+        return self.task_keyprefix + task_id
 
-    def get_key_for_taskset(self, task_id):
+    def get_key_for_taskset(self, taskset_id):
         """Get the cache key for a task by id."""
-        return "celery-taskset-meta-%s" % task_id
+        return self.taskset_keyprefix + taskset_id
+
+    def _strip_prefix(self, key):
+        for prefix in self.task_keyprefix, self.taskset_keyprefix:
+            if key.startswith(prefix):
+                return key[len(prefix):]
+        return key
+
+    def _mget_to_results(self, values, keys):
+        if hasattr(values, "items"):
+            # client returns dict so mapping preserved.
+            return dict((self._strip_prefix(k), pickle.loads(str(v)))
+                            for k, v in values.iteritems()
+                                if v is not None)
+        else:
+            # client returns list so need to recreate mapping.
+            return dict((keys[i], pickle.loads(str(value)))
+                            for i, value in enumerate(values)
+                                if value is not None)
+
+    def get_many(self, task_ids, timeout=None, interval=0.5):
+        ids = set(task_ids)
+        cached_ids = set()
+        for task_id in ids:
+            try:
+                cached = self._cache[task_id]
+            except KeyError:
+                pass
+            else:
+                if cached["status"] in states.READY_STATES:
+                    yield task_id, cached
+                    cached_ids.add(task_id)
+
+        ids ^= cached_ids
+        while ids:
+            keys = list(ids)
+            r = self._mget_to_results(self.mget([self.get_key_for_task(k)
+                                                    for k in keys]), keys)
+            self._cache.update(r)
+            ids ^= set(r.keys())
+            for key, value in r.iteritems():
+                yield key, value
+            time.sleep(interval)  # don't busy loop.
 
     def _forget(self, task_id):
         self.delete(self.get_key_for_task(task_id))
@@ -239,9 +322,12 @@ class KeyValueStoreBackend(BaseDictBackend):
         return result
 
     def _save_taskset(self, taskset_id, result):
-        meta = {"result": result}
-        self.set(self.get_key_for_taskset(taskset_id), pickle.dumps(meta))
+        self.set(self.get_key_for_taskset(taskset_id),
+                 pickle.dumps({"result": result}))
         return result
+
+    def _delete_taskset(self, taskset_id):
+        self.delete(self.get_key_for_taskset(taskset_id))
 
     def _get_task_meta_for(self, task_id):
         """Get task metadata for a task by id."""
@@ -256,3 +342,18 @@ class KeyValueStoreBackend(BaseDictBackend):
         if meta:
             meta = pickle.loads(str(meta))
             return meta
+
+
+class DisabledBackend(BaseBackend):
+
+    def store_result(self, *args, **kwargs):
+        pass
+
+    def _is_disabled(self, *args, **kwargs):
+        raise NotImplementedError("No result backend configured.  "
+                "Please see the documentation for more information.")
+
+    wait_for = _is_disabled
+    get_status = _is_disabled
+    get_result = _is_disabled
+    get_traceback = _is_disabled

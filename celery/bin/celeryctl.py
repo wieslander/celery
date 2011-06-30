@@ -1,3 +1,5 @@
+from __future__ import with_statement
+
 import sys
 
 from optparse import OptionParser, make_option as Option
@@ -7,7 +9,7 @@ from textwrap import wrap
 from anyjson import deserialize
 
 from celery import __version__
-from celery.app import app_or_default
+from celery.app import app_or_default, current_app
 from celery.bin.base import Command as CeleryCommand
 from celery.utils import term
 
@@ -19,8 +21,8 @@ class Error(Exception):
     pass
 
 
-def command(fun):
-    commands[fun.__name__] = fun
+def command(fun, name=None):
+    commands[name or fun.__name__] = fun
     return fun
 
 
@@ -104,6 +106,28 @@ class Command(object):
         return OK, pformat(n)
 
 
+class list_(Command):
+    args = "<bindings>"
+
+    def list_bindings(self, channel):
+        fmt = lambda q, e, r: self.out("%s %s %s" % (q.ljust(28),
+                                                     e.ljust(28), r))
+        fmt("Queue", "Exchange", "Routing Key")
+        fmt("-" * 16, "-" * 16, "-" * 16)
+        for binding in channel.list_bindings():
+            fmt(*binding)
+
+    def run(self, what, *_, **kw):
+        topics = {"bindings": self.list_bindings}
+        if what not in topics:
+            raise ValueError("%r not in %r" % (what, topics.keys()))
+        with self.app.broker_connection() as conn:
+            self.app.amqp.get_task_consumer(conn).declare()
+            with conn.channel() as channel:
+                return topics[what](channel)
+list_ = command(list_, "list")
+
+
 class apply(Command):
     args = "<task_name>"
     option_list = Command.option_list + (
@@ -148,6 +172,28 @@ class apply(Command):
 apply = command(apply)
 
 
+def pluralize(n, text, suffix='s'):
+    if n > 1:
+        return text + suffix
+    return text
+
+
+class purge(Command):
+
+    def run(self, *args, **kwargs):
+        app = current_app()
+        queues = len(app.amqp.queues.keys())
+        messages_removed = app.control.discard_all()
+        if messages_removed:
+            self.out("Purged %s %s from %s known task %s." % (
+                messages_removed, pluralize(messages_removed, "message"),
+                queues, pluralize(queues, "queue")))
+        else:
+            self.out("No messages purged from %s known %s" % (
+                queues, pluralize(queues, "queue")))
+purge = command(purge)
+
+
 class result(Command):
     args = "<task_id>"
     option_list = Command.option_list + (
@@ -168,6 +214,7 @@ result = command(result)
 
 class inspect(Command):
     choices = {"active": 1.0,
+               "active_queues": 1.0,
                "scheduled": 1.0,
                "reserved": 1.0,
                "stats": 1.0,
@@ -204,10 +251,10 @@ class inspect(Command):
         if destination and isinstance(destination, basestring):
             destination = map(str.strip, destination.split(","))
 
-        def on_reply(message_data):
+        def on_reply(body):
             c = self.colored
-            node = message_data.keys()[0]
-            reply = message_data[node]
+            node = body.keys()[0]
+            reply = body[node]
             status, preply = self.prettify(reply)
             self.say("->", c.cyan(node, ": ") + status, indent(preply))
 

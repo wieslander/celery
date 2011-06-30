@@ -25,7 +25,7 @@ Given a function create_user`, that takes two arguments: `username` and
 
     from django.contrib.auth import User
 
-    @celery.task()
+    @task
     def create_user(username, password):
         User.objects.create(username=username, password=password)
 
@@ -34,19 +34,22 @@ Task options are added as arguments to `task`:
 
 .. code-block:: python
 
-    @celery.task(serializer="json")
+    @task(serializer="json")
     def create_user(username, password):
         User.objects.create(username=username, password=password)
 
 .. _task-request-info:
 
-Task Request Info
-=================
+Context
+=======
 
-The `task.request` attribute contains information about
-the task being executed, and contains the following attributes:
+`task.request` contains information and state related
+the currently executing task, and must always contain the following
+attributes:
 
 :id: The unique id of the executing task.
+
+:taskset: The unique id of the taskset this task is a member of (if any).
 
 :args: Positional arguments.
 
@@ -56,11 +59,11 @@ the task being executed, and contains the following attributes:
           An integer starting at `0`.
 
 :is_eager: Set to :const:`True` if the task is executed locally in
-           the client, kand not by a worker.
+           the client, and not by a worker.
 
 :logfile: The file the worker logs to.  See `Logging`_.
 
-:loglevel: The current loglevel used.
+:loglevel: The current log level used.
 
 :delivery_info: Additional message delivery information. This is a mapping
                 containing the exchange and routing key used to deliver this
@@ -76,7 +79,7 @@ Example Usage
 
 ::
 
-    @celery.task
+    @task
     def add(x, y):
         print("Executing task id %r, args: %r kwargs: %r" % (
             add.request.id, add.request.args, add.request.kwargs))
@@ -91,7 +94,7 @@ the worker log:
 
 .. code-block:: python
 
-    @celery.task()
+    @task
     def add(x, y):
         logger = add.get_logger()
         logger.info("Adding %s + %s" % (x, y))
@@ -101,7 +104,7 @@ There are several logging levels available, and the workers `loglevel`
 setting decides whether or not they will be written to the log file.
 
 Of course, you can also simply use `print` as anything written to standard
-out/-err will be written to the logfile as well.
+out/-err will be written to the log file as well.
 
 .. _task-retry:
 
@@ -114,7 +117,7 @@ It will do the right thing, and respect the
 
 .. code-block:: python
 
-    @celery.task()
+    @task
     def send_twitter_status(oauth, tweet):
         try:
             twitter = Twitter(oauth)
@@ -145,13 +148,13 @@ You can also provide the `countdown` argument to
 
 .. code-block:: python
 
-    @celery.task(default_retry_delay=30 * 60)  # retry in 30 minutes.
+    @task(default_retry_delay=30 * 60)  # retry in 30 minutes.
     def add(x, y):
         try:
             ...
         except Exception, exc:
-            self.retry(exc=exc, countdown=60)  # override the default and
-                                               # retry in 1 minute
+            add.retry(exc=exc, countdown=60)  # override the default and
+                                              # retry in 1 minute
 
 .. _task-options:
 
@@ -181,7 +184,7 @@ General
 .. attribute:: Task.abstract
 
     Abstract classes are not registered, but are used as the
-    superclass when making new task types by subclassing.
+    base class for new task types.
 
 .. attribute:: Task.max_retries
 
@@ -210,6 +213,16 @@ General
     :setting:`CELERY_DEFAULT_RATE_LIMIT` setting, which if not specified means
     rate limiting for tasks is disabled by default.
 
+.. attribute:: Task.time_limit
+
+    The hard time limit for this task.  If not set then the workers default
+    will be used.
+
+.. attribute:: Task.soft_time_limit
+
+    The soft time limit for this task.  If not set then the workers default
+    will be used.
+
 .. attribute:: Task.ignore_result
 
     Don't store task state.    Note that this means you can't use
@@ -223,14 +236,14 @@ General
 
 .. attribute:: Task.send_error_emails
 
-    Send an e-mail whenever a task of this type fails.
+    Send an email whenever a task of this type fails.
     Defaults to the :setting:`CELERY_SEND_TASK_ERROR_EMAILS` setting.
     See :ref:`conf-error-mails` for more information.
 
 .. attribute:: Task.error_whitelist
 
-    If the sending of error e-emails is enabled for this task, then
-    this is a whitelist of exceptions to actually send e-mails about.
+    If the sending of error emails is enabled for this task, then
+    this is a white list of exceptions to actually send emails about.
 
 .. attribute:: Task.serializer
 
@@ -257,10 +270,8 @@ General
     crashes in the middle of execution, which may be acceptable for some
     applications.
 
-    The global default can be overriden by the :setting:`CELERY_ACKS_LATE`
+    The global default can be overridden by the :setting:`CELERY_ACKS_LATE`
     setting.
-
-.. _task-track-started:
 
 .. attribute:: Task.track_started
 
@@ -272,8 +283,8 @@ General
     when there are long running tasks and there is a need to report which
     task is currently running.
 
-    The hostname and pid of the worker executing the task
-    will be avaiable in the state metadata (e.g. `result.info["pid"]`)
+    The host name and process id of the worker executing the task
+    will be available in the state metadata (e.g. `result.info["pid"]`)
 
     The global default can be overridden by the
     :setting:`CELERY_TRACK_STARTED` setting.
@@ -347,7 +358,7 @@ For example:
 
 .. code-block:: python
 
-    >>> @celery.task(name="sum-of-two-numbers")
+    >>> @task(name="sum-of-two-numbers")
     >>> def add(x, y):
     ...     return x + y
 
@@ -360,7 +371,7 @@ another module:
 
 .. code-block:: python
 
-    >>> @celery.task(name="tasks.add")
+    >>> @task(name="tasks.add")
     >>> def add(x, y):
     ...     return x + y
 
@@ -373,7 +384,7 @@ task if the module name is "tasks.py":
 
 .. code-block:: python
 
-    >>> @celery.task()
+    >>> @task()
     >>> def add(x, y):
     ...     return x + y
 
@@ -417,74 +428,36 @@ add the project directory to the Python path::
 
 This makes more sense from the reusable app perspective anyway.
 
-.. tasks-decorating:
+.. _tasks-decorating:
 
 Decorating tasks
 ================
 
-Using decorators with tasks requires extra steps because of the magic keyword
-arguments.
-
-If you have the following task and decorator:
+When using other decorators you must make sure that the `task`
+decorator is applied last:
 
 .. code-block:: python
 
-    from celery.utils.functional import wraps
-
-    def decorator(task):
-
-        @wraps(task)
-        def _decorated(*args, **kwargs):
-            print("inside decorator")
-            return task(*args, **kwargs)
-
-
-    @decorator
     @task
+    @decorator2
+    @decorator1
     def add(x, y):
         return x + y
 
-Then the worker will see that the task is accepting keyword arguments,
-while it really doesn't, resulting in an error.
 
-The workaround is to either have your task accept arbitrary keyword
-arguments:
-
-.. code-block:: python
-
-    @decorator
-    @task
-    def add(x, y, **kwargs):
-        return x + y
-
-or patch the decorator to preserve the original signature:
-
-.. code-block:: python
-
-    from inspect import getargspec
-    from celery.utils.functional import wraps
-
-    def decorator(task):
-
-        @wraps(task)
-        def _decorated(*args, **kwargs):
-            print("in decorator")
-            return task(*args, **kwargs)
-        _decorated.argspec = inspect.getargspec(task)
-
-Also note the use of :func:`~celery.utils.functional.wraps` here,
-this is necessary to keep the original function name and docstring.
-
-.. note::
-
-    The magic keyword arguments will be deprecated in the future,
-    replaced by the `task.request` attribute in 2.2, and the
-    keyword arguments will be removed in 3.0.
+Which means the `@task` decorator must be the top statement.
 
 .. _task-states:
 
 Task States
 ===========
+
+Celery can keep track of the tasks current state.  The state also contains the
+result of a successful task, or the exception and traceback information of a
+failed task.
+
+There are several *result backends* to choose from, and they all have
+different strenghts and weaknesses (see :ref:`task-result-backends`).
 
 During its lifetime a task will transition through several possible states,
 and each state may have arbitrary metadata attached to it.  When a task
@@ -502,6 +475,79 @@ the exception should be re-raised (:state:`PROPAGATE_STATES`), or whether
 the result can be cached (it can if the task is ready).
 
 You can also define :ref:`custom-states`.
+
+.. _task-result-backends:
+
+Result Backends
+---------------
+
+Celery needs to store or send the states somewhere.  There are several
+built-in backends to choose from: SQLAlchemy/Django ORM, Memcached, Redis,
+AMQP, MongoDB, Tokyo Tyrant and Redis -- or you can define your own.
+
+No backend works well for every use case.
+You should read about the strenghts and weaknesses of each backend, and choose
+the most appropriate for your needs.
+
+
+.. seealso::
+
+    :ref:`conf-result-backend`
+
+AMQP Result Backend
+~~~~~~~~~~~~~~~~~~~
+
+The AMQP result backend is special as it does not actually *store* the states,
+but rather sends them as messages.  This is an important difference as it
+means that a result *can only be retrieved once*; If you have two processes
+waiting for the same result, one of the processes will never receive the
+result!
+
+Even with that limitation, it is an excellent choice if you need to receive
+state changes in real-time.  Using messaging means the client does not have to
+poll for new states.
+
+There are several other pitfalls you should be aware of when using the AMQP
+backend:
+
+* Every new task creates a new queue on the server, with thousands of tasks
+  the broker may be overloaded with queues and this will affect performance in
+  negative ways. If you're using RabbitMQ then each queue will be a separate
+  Erlang process, so if you're planning to keep many results simultaneously you
+  may have to increase the Erlang process limit, and the maximum number of file
+  descriptors your OS allows.
+
+* Old results will not be cleaned automatically, so you must make sure to
+  consume the results or else the number of queues will eventually go out of
+  control.  If you're running RabbitMQ 2.1.1 or higher you can take advantage
+  of the ``x-expires`` argument to queues, which will expire queues after a
+  certain time limit after they are unused.  The queue expiry can be set (in
+  seconds) by the :setting:`CELERY_AMQP_TASK_RESULT_EXPIRES` setting (not
+  enabled by default).
+
+For a list of options supported by the AMQP result backend, please see
+:ref:`conf-amqp-result-backend`.
+
+
+Database Result Backend
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Keeping state in the database can be convenient for many, especially for
+web applications with a database already in place, but it also comes with
+limitations.
+
+* Polling the database for new states is expensive, and so you should
+  increase the polling intervals of operations such as `result.wait()`, and
+  `tasksetresult.join()`
+
+* Some databases uses a default transaction isolation level that
+  is not suitable for polling tables for changes.
+
+  In MySQL the default transaction isolation level is `REPEATABLE-READ`, which
+  means the transaction will not see changes by other transactions until the
+  transaction is commited.  It is recommended that you change to the
+  `READ-COMMITTED` isolation level.
+
 
 .. _task-builtin-states:
 
@@ -522,7 +568,7 @@ STARTED
 ~~~~~~~
 
 Task has been started.
-Not reported by default, to enable please see :ref:`task-track-started`.
+Not reported by default, to enable please see :attr`Task.track_started`.
 
 :metadata: `pid` and `hostname` of the worker process executing
            the task.
@@ -545,7 +591,7 @@ FAILURE
 
 Task execution resulted in failure.
 
-:metadata: `result` contains the exception occured, and `traceback`
+:metadata: `result` contains the exception occurred, and `traceback`
            contains the backtrace of the stack at the point when the
            exception was raised.
 :propagates: Yes
@@ -571,18 +617,20 @@ Task has been revoked.
 
 :propagates: Yes
 
+.. _custom-states:
+
 Custom states
 -------------
 
 You can easily define your own states, all you need is a unique name.
 The name of the state is usually an uppercase string.  As an example
 you could have a look at :mod:`abortable tasks <~celery.contrib.abortable>`
-wich defines its own custom :state:`ABORTED` state.
+which defines its own custom :state:`ABORTED` state.
 
 Use :meth:`Task.update_state <celery.task.base.BaseTask.update_state>` to
 update a tasks state::
 
-    @celery.task
+    @task
     def upload_files(filenames):
         for i, file in enumerate(filenames):
             upload_files.update_state(state="PROGRESS",
@@ -593,6 +641,163 @@ Here we created the state `"PROGRESS"`, which tells any application
 aware of this state that the task is currently in progress, and also where
 it is in the process by having `current` and `total` counts as part of the
 state metadata.  This can then be used to create e.g. progress bars.
+
+.. _task-custom-classes:
+
+Creating custom task classes
+============================
+
+All tasks inherit from the :class:`celery.task.Task` class.
+The tasks body is its :meth:`run` method.
+
+The following code,
+
+.. code-block:: python
+
+    @task
+    def add(x, y):
+        return x + y
+
+
+will do roughly this behind the scenes:
+
+    @task
+    def AddTask(Task):
+
+        def run(self, x, y):
+            return x + y
+    add = registry.tasks[AddTask.name]
+
+
+Instantiation
+-------------
+
+A task is **not** instantiated for every request, but is registered
+in the task registry as a global instance.
+
+This means that the ``__init__`` constructor will only be called
+once per process, and that the task class is semantically closer to an
+Actor.
+
+If you have a task,
+
+.. code-block:: python
+
+    class NaiveAuthenticateServer(Task):
+
+        def __init__(self):
+            self.users = {"george": "password"}
+
+        def run(self, username, password):
+            try:
+                return self.users[username] == password
+            except KeyError:
+                return False
+
+And you route every request to the same process, then it
+will keep state between requests.
+
+This can also be useful to keep cached resources::
+
+    class DatabaseTask(Task):
+        _db = None
+
+        @property
+        def db(self):
+            if self._db = None:
+                self._db = Database.connect()
+            return self._db
+
+Abstract classes
+----------------
+
+Abstract classes are not registered, but are used as the
+base class for new task types.
+
+.. code-block:: python
+
+    class DebugTask(object):
+        abstract = True
+
+        def after_return(self, \*args, \*\*kwargs):
+            print("Task returned: %r" % (self.request, ))
+
+
+    @task(base=DebugTask)
+    def add(x, y):
+        return x + y
+
+
+Handlers
+--------
+
+.. method:: execute(self, request, pool, loglevel, logfile, \*\*kw):
+
+    :param request: A :class:`~celery.worker.job.TaskRequest`.
+    :param pool: The task pool.
+    :param loglevel: Current loglevel.
+    :param logfile: Name of the currently used logfile.
+
+    :keyword consumer: The :class:`~celery.worker.consumer.Consumer`.
+
+.. method:: after_return(self, status, retval, task_id, args, kwargs, einfo)
+
+    Handler called after the task returns.
+
+    :param status: Current task state.
+    :param retval: Task return value/exception.
+    :param task_id: Unique id of the task.
+    :param args: Original arguments for the task that failed.
+    :param kwargs: Original keyword arguments for the task
+                   that failed.
+
+    :keyword einfo: :class:`~celery.datastructures.ExceptionInfo`
+                    instance, containing the traceback (if any).
+
+    The return value of this handler is ignored.
+
+.. method:: on_failure(self, exc, task_id, args, kwargs, einfo)
+
+    This is run by the worker when the task fails.
+
+    :param exc: The exception raised by the task.
+    :param task_id: Unique id of the failed task.
+    :param args: Original arguments for the task that failed.
+    :param kwargs: Original keyword arguments for the task
+                       that failed.
+
+    :keyword einfo: :class:`~celery.datastructures.ExceptionInfo`
+                           instance, containing the traceback.
+
+    The return value of this handler is ignored.
+
+.. method:: on_retry(self, exc, task_id, args, kwargs, einfo)
+
+    This is run by the worker when the task is to be retried.
+
+    :param exc: The exception sent to :meth:`retry`.
+    :param task_id: Unique id of the retried task.
+    :param args: Original arguments for the retried task.
+    :param kwargs: Original keyword arguments for the retried task.
+
+    :keyword einfo: :class:`~celery.datastructures.ExceptionInfo`
+                    instance, containing the traceback.
+
+    The return value of this handler is ignored.
+
+.. method:: on_success(self, retval, task_id, args, kwargs)
+
+    Run by the worker if the task executes successfully.
+
+    :param retval: The return value of the task.
+    :param task_id: Unique id of the executed task.
+    :param args: Original arguments for the executed task.
+    :param kwargs: Original keyword arguments for the executed task.
+
+    The return value of this handler is ignored.
+
+on_retry
+~~~~~~~~
 
 .. _task-how-they-work:
 
@@ -633,7 +838,7 @@ The entity responsible for registering your task in the registry is a
 meta class, :class:`~celery.task.base.TaskType`.  This is the default
 meta class for :class:`~celery.task.base.BaseTask`.
 
-If you want to register your task manually you can set mark the
+If you want to register your task manually you can mark the
 task as :attr:`~celery.task.base.BaseTask.abstract`:
 
 .. code-block:: python
@@ -641,11 +846,12 @@ task as :attr:`~celery.task.base.BaseTask.abstract`:
     class MyTask(Task):
         abstract = True
 
-This way the task won't be registered, but any task subclassing it will be.
+This way the task won't be registered, but any task inheriting from
+it will be.
 
 When tasks are sent, we don't send any actual function code, just the name
 of the task to execute.  When the worker then receives the message it can look
-up th ename in its task registry to find the execution code.
+up the name in its task registry to find the execution code.
 
 This means that your workers should always be updated with the same software
 as the client.  This is a drawback, but the alternative is a technical
@@ -667,7 +873,7 @@ wastes time and resources.
 
 .. code-block:: python
 
-    @celery.task(ignore_result=True)
+    @task(ignore_result=True)
     def mytask(...)
         something()
 
@@ -704,21 +910,21 @@ Make your design asynchronous instead, for example by using *callbacks*.
 
 .. code-block:: python
 
-    @celery.task()
+    @task
     def update_page_info(url):
         page = fetch_page.delay(url).get()
         info = parse_page.delay(url, page).get()
         store_page_info.delay(url, info)
 
-    @celery.task()
+    @task
     def fetch_page(url):
         return myhttplib.get(url)
 
-    @celery.task()
+    @task
     def parse_page(url, page):
         return myparser.parse_document(page)
 
-    @celery.task()
+    @task
     def store_page_info(url, info):
         return PageInfo.objects.create(url, info)
 
@@ -727,13 +933,13 @@ Make your design asynchronous instead, for example by using *callbacks*.
 
 .. code-block:: python
 
-    @celery.task(ignore_result=True)
+    @task(ignore_result=True)
     def update_page_info(url):
         # fetch_page -> parse_page -> store_page
         fetch_page.delay(url, callback=subtask(parse_page,
                                     callback=subtask(store_page_info)))
 
-    @celery.task(ignore_result=True)
+    @task(ignore_result=True)
     def fetch_page(url, callback=None):
         page = myhttplib.get(url)
         if callback:
@@ -742,13 +948,13 @@ Make your design asynchronous instead, for example by using *callbacks*.
             # into a subtask object.
             subtask(callback).delay(url, page)
 
-    @celery.task(ignore_result=True)
+    @task(ignore_result=True)
     def parse_page(url, page, callback=None):
         info = myparser.parse_document(page)
         if callback:
             subtask(callback).delay(url, info)
 
-    @celery.task(ignore_result=True)
+    @task(ignore_result=True)
     def store_page_info(url, info):
         PageInfo.objects.create(url, info)
 
@@ -830,13 +1036,13 @@ The ancient async sayings tells us that “asserting the world is the
 responsibility of the task”.  What this means is that the world view may
 have changed since the task was requested, so the task is responsible for
 making sure the world is how it should be;  If you have a task
-that reindexes a search engine, and the search engine should only be reindexed
-at maximum every 5 minutes, then it must be the tasks responsibility to assert
-that, not the callers.
+that re-indexes a search engine, and the search engine should only be
+re-indexed at maximum every 5 minutes, then it must be the tasks
+responsibility to assert that, not the callers.
 
-Another gotcha is Django model objects.  They shouldn't be passed on as arguments
-to tasks.  It's almost always better to re-fetch the object from the
-database when the task is running instead,  as using old data may lead
+Another gotcha is Django model objects.  They shouldn't be passed on as
+arguments to tasks.  It's almost always better to re-fetch the object from
+the database when the task is running instead,  as using old data may lead
 to race conditions.
 
 Imagine the following scenario where you have an article and a task
@@ -848,7 +1054,7 @@ that automatically expands some abbreviations in it:
         title = models.CharField()
         body = models.TextField()
 
-    @celery.task
+    @task
     def expand_abbreviations(article):
         article.body.replace("MyCorp", "My Corporation")
         article.save()
@@ -869,7 +1075,7 @@ re-fetch the article in the task body:
 
 .. code-block:: python
 
-    @celery.task
+    @task
     def expand_abbreviations(article_id):
         article = Article.objects.get(id=article_id)
         article.body.replace("MyCorp", "My Corporation")
@@ -947,7 +1153,7 @@ The comment model looks like this:
 
     class Comment(models.Model):
         name = models.CharField(_("name"), max_length=64)
-        email_address = models.EmailField(_("e-mail address"))
+        email_address = models.EmailField(_("email address"))
         homepage = models.URLField(_("home page"),
                                    blank=True, verify_exists=False)
         comment = models.TextField(_("comment"))
@@ -1021,7 +1227,7 @@ blog/tasks.py
 .. code-block:: python
 
     from akismet import Akismet
-    from celery.decorators import task
+    from celery.task import task
 
     from django.core.exceptions import ImproperlyConfigured
     from django.contrib.sites.models import Site

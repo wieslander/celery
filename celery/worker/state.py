@@ -1,7 +1,18 @@
+import os
+import platform
 import shelve
 
-from celery.utils.compat import defaultdict
+from collections import defaultdict
+
+from kombu.utils import cached_property
+
+from celery import __version__
 from celery.datastructures import LimitedSet
+
+#: Worker software/platform information.
+SOFTWARE_INFO = {"sw_ident": "celeryd",
+                 "sw_ver": __version__,
+                 "sw_sys": platform.system()}
 
 #: maximum number of revokes to keep in memory.
 REVOKES_MAX = 10000
@@ -40,9 +51,36 @@ def task_ready(request):
     reserved_requests.discard(request)
 
 
+if os.environ.get("CELERY_BENCH"):  # pragma: no cover
+    from time import time
+
+    all_count = 0
+    bench_start = None
+    bench_every = int(os.environ.get("CELERY_BENCH_EVERY", 1000))
+    __reserved = task_reserved
+    __ready = task_ready
+
+    def task_reserved(request):  # noqa
+        global bench_start
+        if bench_start is None:
+            bench_start = time()
+        return __reserved(request)
+
+    def task_ready(request):  # noqa
+        global all_count, bench_start
+        all_count += 1
+        if not all_count % bench_every:
+            print("* Time spent processing %s tasks (since first "
+                    "task received): ~%.4fs\n" % (
+                bench_every, time() - bench_start))
+            bench_start = None
+
+        return __ready(request)
+
+
 class Persistent(object):
     storage = shelve
-    _open = None
+    _is_open = False
 
     def __init__(self, filename):
         self.filename = filename
@@ -66,16 +104,15 @@ class Persistent(object):
         return self.storage.open(self.filename)
 
     def close(self):
-        if self._open:
-            self._open.close()
-            self._open = None
+        if self._is_open:
+            self.db.close()
+            self._is_open = False
 
     def _load(self):
         self.merge(self.db)
         self.close()
 
-    @property
+    @cached_property
     def db(self):
-        if self._open is None:
-            self._open = self.open()
-        return self._open
+        self._is_open = True
+        return self.open()

@@ -4,12 +4,13 @@ from datetime import datetime
 try:
     import pymongo
 except ImportError:
-    pymongo = None
+    pymongo = None  # noqa
 
 from celery import states
 from celery.backends.base import BaseDictBackend
 from celery.exceptions import ImproperlyConfigured
-from celery.serialization import pickle
+from celery.utils.serialization import pickle
+from celery.utils.timeutils import maybe_timedelta
 
 
 class Bunch:
@@ -33,8 +34,9 @@ class MongoBackend(BaseDictBackend):
             module :mod:`pymongo` is not available.
 
         """
-        self.result_expires = kwargs.get("result_expires") or \
-                                self.app.conf.CELERY_TASK_RESULT_EXPIRES
+        super(MongoBackend, self).__init__(*args, **kwargs)
+        self.expires = kwargs.get("expires") or maybe_timedelta(
+                                    self.app.conf.CELERY_TASK_RESULT_EXPIRES)
 
         if not pymongo:
             raise ImproperlyConfigured(
@@ -57,7 +59,6 @@ class MongoBackend(BaseDictBackend):
             self.mongodb_taskmeta_collection = config.get(
                 "taskmeta_collection", self.mongodb_taskmeta_collection)
 
-        super(MongoBackend, self).__init__(*args, **kwargs)
         self._connection = None
         self._database = None
 
@@ -132,6 +133,6 @@ class MongoBackend(BaseDictBackend):
         taskmeta_collection = db[self.mongodb_taskmeta_collection]
         taskmeta_collection.remove({
                 "date_done": {
-                    "$lt": datetime.now() - self.result_expires,
+                    "$lt": datetime.now() - self.expires,
                  }
         })

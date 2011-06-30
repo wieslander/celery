@@ -22,19 +22,37 @@
     `ERROR`, `CRITICAL`, or `FATAL`.
 
 """
-from celery.bin.base import Command, Option
+from __future__ import with_statement, absolute_import
+
+from functools import partial
+
+from celery.platforms import detached
+from celery.bin.base import Command, Option, daemon_options
 
 
 class BeatCommand(Command):
+    supports_args = False
 
-    def run(self, *args, **kwargs):
+    def run(self, detach=False, logfile=None, pidfile=None, uid=None,
+            gid=None, umask=None, working_directory=None, **kwargs):
         kwargs.pop("app", None)
-        return self.app.Beat(**kwargs).run()
+        beat = partial(self.app.Beat,
+                       logfile=logfile, pidfile=pidfile, **kwargs)
+        workdir = working_directory
+
+        if detach:
+            with detached(logfile, pidfile, uid, gid, umask, workdir):
+                return beat().run()
+        else:
+            return beat().run()
 
     def get_options(self):
         conf = self.app.conf
 
         return (
+            Option('--detach',
+                default=False, action="store_true", dest="detach",
+                help="Detach and run in the background."),
             Option('-s', '--schedule',
                 default=conf.CELERYBEAT_SCHEDULE_FILENAME,
                 action="store", dest="schedule",
@@ -49,14 +67,12 @@ class BeatCommand(Command):
                 action="store", dest="scheduler_cls",
                 help="Scheduler class. Default is "
                      "celery.beat.PersistentScheduler"),
-            Option('-f', '--logfile', default=conf.CELERYBEAT_LOG_FILE,
-                action="store", dest="logfile",
-                help="Path to log file."),
             Option('-l', '--loglevel',
                 default=conf.CELERYBEAT_LOG_LEVEL,
                 action="store", dest="loglevel",
                 help="Loglevel. One of DEBUG/INFO/WARNING/ERROR/CRITICAL."),
-        )
+        ) + daemon_options(default_pidfile="celerybeat.pid",
+                           default_logfile=conf.CELERYBEAT_LOG_FILE)
 
 
 def main():

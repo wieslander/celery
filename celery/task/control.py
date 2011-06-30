@@ -1,3 +1,5 @@
+from __future__ import absolute_import, with_statement
+
 from kombu.pidbox import Mailbox
 
 from celery.app import app_or_default
@@ -70,6 +72,9 @@ class Inspect(object):
     def cancel_consumer(self, queue, **kwargs):
         return self._request("cancel_consumer", queue=queue, **kwargs)
 
+    def active_queues(self):
+        return self._request("active_queues")
+
 
 class Control(object):
     Mailbox = Mailbox
@@ -91,24 +96,22 @@ class Control(object):
         :returns: the number of tasks discarded.
 
         """
-
-        def _do_discard(connection=None, connect_timeout=None):
-            consumer = self.app.amqp.get_task_consumer(connection=connection)
-            try:
+        with self.app.default_connection(connection, connect_timeout) as conn:
+            with self.app.amqp.get_task_consumer(connection=conn) as consumer:
                 return consumer.discard_all()
-            finally:
-                consumer.close()
 
-        return self.app.with_default_connection(_do_discard)(
-                connection=connection, connect_timeout=connect_timeout)
-
-    def revoke(self, task_id, destination=None, **kwargs):
+    def revoke(self, task_id, destination=None, terminate=False,
+            signal="SIGTERM", **kwargs):
         """Revoke a task by id.
 
         If a task is revoked, the workers will ignore the task and
         not execute it after all.
 
         :param task_id: Id of the task to revoke.
+        :keyword terminate: Also terminate the process currently working
+            on the task (if any).
+        :keyword signal: Name of signal to send to process if terminate.
+            Default is TERM.
         :keyword destination: If set, a list of the hosts to send the
             command to, when empty broadcast to all workers.
         :keyword connection: Custom broker connection to use, if not set,
@@ -121,7 +124,9 @@ class Control(object):
 
         """
         return self.broadcast("revoke", destination=destination,
-                              arguments={"task_id": task_id}, **kwargs)
+                              arguments={"task_id": task_id,
+                                         "terminate": terminate,
+                                         "signal": signal}, **kwargs)
 
     def ping(self, destination=None, timeout=1, **kwargs):
         """Ping workers.
@@ -145,7 +150,7 @@ class Control(object):
     def rate_limit(self, task_name, rate_limit, destination=None, **kwargs):
         """Set rate limit for task by type.
 
-        :param task_name: Type of task to change rate limit for.
+        :param task_name: Name of task to change rate limit for.
         :param rate_limit: The rate limit as tasks per second, or a rate limit
             string (`"100/m"`, etc.
             see :attr:`celery.task.base.Task.rate_limit` for
@@ -166,9 +171,24 @@ class Control(object):
                                          "rate_limit": rate_limit},
                               **kwargs)
 
+    def time_limit(self, task_name, soft=None, hard=None, **kwargs):
+        """Set time limits for task by type.
+
+        :param task_name: Name of task to change time limits for.
+        :keyword soft: New soft time limit (in seconds).
+        :keyword hard: New hard time limit (in seconds).
+
+        Any additional keyword arguments are passed on to :meth:`broadcast`.
+
+        """
+        return self.broadcast("time_limit",
+                              arguments={"task_name": task_name,
+                                         "hard": hard, "soft": soft},
+                              **kwargs)
+
     def broadcast(self, command, arguments=None, destination=None,
             connection=None, connect_timeout=None, reply=False, timeout=1,
-            limit=None, callback=None):
+            limit=None, callback=None, channel=None):
         """Broadcast a control command to the celery workers.
 
         :param command: Name of command to send.
@@ -186,19 +206,17 @@ class Control(object):
             received.
 
         """
-        def _do_broadcast(connection=None, connect_timeout=None):
-            return self.mailbox(connection)._broadcast(command, arguments,
-                                                       destination, reply,
-                                                       timeout, limit,
-                                                       callback)
-
-        return self.app.with_default_connection(_do_broadcast)(
-                connection=connection, connect_timeout=connect_timeout)
+        with self.app.default_connection(connection, connect_timeout) as conn:
+            return self.mailbox(conn)._broadcast(command, arguments,
+                                                 destination, reply, timeout,
+                                                 limit, callback,
+                                                 channel=channel)
 
 
 _default_control = Control(app_or_default())
 broadcast = _default_control.broadcast
 rate_limit = _default_control.rate_limit
+time_limit = _default_control.time_limit
 ping = _default_control.ping
 revoke = _default_control.revoke
 discard_all = _default_control.discard_all

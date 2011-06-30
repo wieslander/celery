@@ -72,7 +72,11 @@
 
 """
 import sys
-import multiprocessing
+
+try:
+    from multiprocessing import freeze_support
+except ImportError:  # pragma: no cover
+    freeze_support = lambda: True  # noqa
 
 from celery.bin.base import Command, Option
 
@@ -80,9 +84,15 @@ from celery.bin.base import Command, Option
 class WorkerCommand(Command):
     namespace = "celeryd"
     enable_config_from_cmdline = True
+    supports_args = False
 
     def run(self, *args, **kwargs):
         kwargs.pop("app", None)
+        # Pools like eventlet/gevent needs to patch libs as early
+        # as possible.
+        from celery import concurrency
+        kwargs["pool"] = concurrency.get_implementation(
+                    kwargs.get("pool") or self.app.conf.CELERYD_POOL)
         return self.app.Worker(**kwargs).run()
 
     def get_options(self):
@@ -91,7 +101,12 @@ class WorkerCommand(Command):
             Option('-c', '--concurrency',
                 default=conf.CELERYD_CONCURRENCY,
                 action="store", dest="concurrency", type="int",
-                help="Number of child processes processing the queue."),
+                help="Number of worker threads/processes"),
+            Option('-P', '--pool',
+                default=conf.CELERYD_POOL,
+                action="store", dest="pool", type="str",
+                help="Pool implementation: "
+                     "processes (default), eventlet or gevent."),
             Option('--purge', '--discard', default=False,
                 action="store_true", dest="discard",
                 help="Discard all waiting tasks before the server is"
@@ -167,7 +182,7 @@ class WorkerCommand(Command):
 
 
 def main():
-    multiprocessing.freeze_support()
+    freeze_support()
     worker = WorkerCommand()
     worker.execute_from_commandline()
 

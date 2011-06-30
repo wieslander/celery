@@ -1,12 +1,14 @@
+from __future__ import absolute_import, with_statement
+
 import threading
-import time
 
 from collections import deque
+from time import time, sleep
 from Queue import Queue, Empty
 
 from celery.datastructures import TokenBucket
 from celery.utils import timeutils
-from celery.utils.compat import all, izip_longest, chain_from_iterable
+from celery.utils.compat import izip_longest, chain_from_iterable
 
 
 class RateLimitExceeded(Exception):
@@ -51,14 +53,11 @@ class TaskBucket(object):
     def put(self, request):
         """Put a :class:`~celery.worker.job.TaskRequest` into
         the appropiate bucket."""
-        self.mutex.acquire()
-        try:
+        with self.mutex:
             if request.task_name not in self.buckets:
                 self.add_bucket_for_type(request.task_name)
             self.buckets[request.task_name].put_nowait(request)
             self.not_empty.notify()
-        finally:
-            self.mutex.release()
     put_nowait = put
 
     def _get_immediate(self):
@@ -110,11 +109,10 @@ class TaskBucket(object):
         consume tokens from it.
 
         """
-        time_start = time.time()
-        did_timeout = lambda: timeout and time.time() - time_start > timeout
+        time_start = time()
+        did_timeout = lambda: timeout and time() - time_start > timeout
 
-        self.not_empty.acquire()
-        try:
+        with self.not_empty:
             while True:
                 try:
                     remaining_time, item = self._get()
@@ -126,11 +124,9 @@ class TaskBucket(object):
                 if remaining_time:
                     if not block or did_timeout():
                         raise Empty()
-                    time.sleep(min(remaining_time, timeout or 1))
+                    sleep(min(remaining_time, timeout or 1))
                 else:
                     return item
-        finally:
-            self.not_empty.release()
 
     def get_nowait(self):
         return self.get(block=False)
@@ -267,6 +263,9 @@ class TokenBucketQueue(object):
         """
         get = block and self.queue.get or self.queue.get_nowait
 
+        if not block and not self.items:
+            raise Empty()
+
         if not self._bucket.can_consume(1):
             raise RateLimitExceeded()
 
@@ -298,15 +297,19 @@ class TokenBucketQueue(object):
     def wait(self, block=False):
         """Wait until a token can be retrieved from the bucket and return
         the next item."""
-        while True:
-            remaining = self.expected_time()
+        get = self.get
+        expected_time = self.expected_time
+        while 1:
+            remaining = expected_time()
             if not remaining:
-                return self.get(block=block)
-            time.sleep(remaining)
+                return get(block=block)
+            sleep(remaining)
 
     def expected_time(self, tokens=1):
         """Returns the expected time in seconds of when a new token should be
         available."""
+        if not self.items:
+            return 0
         return self._bucket.expected_time(tokens)
 
     @property

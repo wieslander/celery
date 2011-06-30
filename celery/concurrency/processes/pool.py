@@ -13,6 +13,7 @@ __all__ = ['Pool']
 #
 
 import os
+import sys
 import errno
 import threading
 import Queue
@@ -20,12 +21,16 @@ import itertools
 import collections
 import time
 import signal
+import warnings
 
 from multiprocessing import Process, cpu_count, TimeoutError
+from multiprocessing import util
 from multiprocessing.util import Finalize, debug
 
 from celery.exceptions import SoftTimeLimitExceeded, TimeLimitExceeded
 from celery.exceptions import WorkerLostError
+
+_Semaphore = threading._Semaphore
 
 #
 # Constants representing the state of a pool
@@ -55,8 +60,33 @@ job_counter = itertools.count()
 def mapstar(args):
     return map(*args)
 
+
+def error(msg, *args, **kwargs):
+    if util._logger:
+        util._logger.error(msg, *args, **kwargs)
+
+
+class LaxBoundedSemaphore(threading._Semaphore):
+    """Semaphore that checks that # release is <= # acquires,
+    but ignores if # releases >= value."""
+
+    def __init__(self, value=1, verbose=None):
+        _Semaphore.__init__(self, value, verbose)
+        self._initial_value = value
+
+    def release(self):
+        if self._Semaphore__value < self._initial_value:
+            _Semaphore.release(self)
+        if __debug__:
+            self._note("%s.release: success, value=%s (unchanged)" % (
+                self, self._Semaphore__value))
+
+    def clear(self):
+        while self._Semaphore__value < self._initial_value:
+            _Semaphore.release(self)
+
 #
-# Code run by worker processes
+# Exceptions
 #
 
 
@@ -76,8 +106,16 @@ class MaybeEncodingError(Exception):
                     self.value, self.exc)
 
 
+class WorkersJoined(Exception):
+    """All workers have terminated."""
+
+
 def soft_timeout_sighandler(signum, frame):
     raise SoftTimeLimitExceeded()
+
+#
+# Code run by worker processes
+#
 
 
 def worker(inqueue, outqueue, initializer=None, initargs=(), maxtasks=None):
@@ -87,12 +125,14 @@ def worker(inqueue, outqueue, initializer=None, initargs=(), maxtasks=None):
     get = inqueue.get
 
     if hasattr(inqueue, '_reader'):
+
         def poll(timeout):
             if inqueue._reader.poll(timeout):
                 return True, get()
             return False, None
     else:
-        def poll(timeout):
+
+        def poll(timeout):  # noqa
             try:
                 return True, get(timeout=timeout)
             except Queue.Empty:
@@ -149,6 +189,14 @@ class PoolThread(threading.Thread):
         self._state = RUN
         self.daemon = True
 
+    def run(self):
+        try:
+            return self.body()
+        except Exception, exc:
+            error("Thread %r crashed: %r" % (self.__class__.__name__, exc, ),
+                  exc_info=sys.exc_info())
+            os._exit(1)
+
     def terminate(self):
         self._state = TERMINATE
 
@@ -162,11 +210,11 @@ class Supervisor(PoolThread):
         self.pool = pool
         super(Supervisor, self).__init__()
 
-    def run(self):
+    def body(self):
         debug('worker handler starting')
         while self._state == RUN and self.pool._state == RUN:
             self.pool._maintain_pool()
-            time.sleep(0.1)
+            time.sleep(0.8)
         debug('worker handler exiting')
 
 
@@ -179,7 +227,7 @@ class TaskHandler(PoolThread):
         self.pool = pool
         super(TaskHandler, self).__init__()
 
-    def run(self):
+    def body(self):
         taskqueue = self.taskqueue
         outqueue = self.outqueue
         put = self.put
@@ -229,7 +277,7 @@ class TimeoutHandler(PoolThread):
         self.t_hard = t_hard
         super(TimeoutHandler, self).__init__()
 
-    def run(self):
+    def body(self):
         processes = self.processes
         cache = self.cache
         t_hard, t_soft = self.t_hard, self.t_soft
@@ -247,7 +295,7 @@ class TimeoutHandler(PoolThread):
             if time.time() >= start + timeout:
                 return True
 
-        def _on_soft_timeout(job, i):
+        def _on_soft_timeout(job, i, soft_timeout):
             debug('soft time limit exceeded for %i' % i)
             process, _index = _process_by_pid(job._worker_pid)
             if not process:
@@ -255,7 +303,7 @@ class TimeoutHandler(PoolThread):
 
             # Run timeout callback
             if job._timeout_callback is not None:
-                job._timeout_callback(soft=True)
+                job._timeout_callback(soft=True, timeout=soft_timeout)
 
             try:
                 os.kill(job._worker_pid, SIG_SOFT_TIMEOUT)
@@ -267,19 +315,21 @@ class TimeoutHandler(PoolThread):
 
             dirty.add(i)
 
-        def _on_hard_timeout(job, i):
+        def _on_hard_timeout(job, i, hard_timeout):
+            if job.ready():
+                return
             debug('hard time limit exceeded for %i', i)
+            # Remove from cache and set return value to an exception
+            job._set(i, (False, TimeLimitExceeded(hard_timeout)))
+
             # Remove from _pool
             process, _index = _process_by_pid(job._worker_pid)
-            # Remove from cache and set return value to an exception
-            job._set(i, (False, TimeLimitExceeded()))
+
             # Run timeout callback
             if job._timeout_callback is not None:
-                job._timeout_callback(soft=False)
-            if not process:
-                return
-            # Terminate the process
-            process.terminate()
+                job._timeout_callback(soft=False, timeout=hard_timeout)
+            if process:
+                process.terminate()
 
         # Inner-loop
         while self._state == RUN:
@@ -290,10 +340,16 @@ class TimeoutHandler(PoolThread):
 
             for i, job in cache.items():
                 ack_time = job._time_accepted
-                if _timed_out(ack_time, t_hard):
-                    _on_hard_timeout(job, i)
-                elif i not in dirty and _timed_out(ack_time, t_soft):
-                    _on_soft_timeout(job, i)
+                soft_timeout = job._soft_timeout
+                if soft_timeout is None:
+                    soft_timeout = t_soft
+                hard_timeout = job._timeout
+                if hard_timeout is None:
+                    hard_timeout = t_hard
+                if _timed_out(ack_time, hard_timeout):
+                    _on_hard_timeout(job, i, hard_timeout)
+                elif i not in dirty and _timed_out(ack_time, soft_timeout):
+                    _on_soft_timeout(job, i, soft_timeout)
 
             time.sleep(0.5)                     # Don't waste CPU cycles.
 
@@ -312,7 +368,7 @@ class ResultHandler(PoolThread):
         self.putlock = putlock
         super(ResultHandler, self).__init__()
 
-    def run(self):
+    def body(self):
         get = self.get
         outqueue = self.outqueue
         cache = self.cache
@@ -328,13 +384,15 @@ class ResultHandler(PoolThread):
                 pass
 
         def on_ready(job, i, obj):
-            if putlock is not None:
-                try:
-                    putlock.release()
-                except ValueError:
-                    pass
             try:
-                cache[job]._set(i, obj)
+                item = cache[job]
+            except KeyError:
+                return
+            if not item.ready():
+                if putlock is not None:
+                    putlock.release()
+            try:
+                item._set(i, obj)
             except KeyError:
                 pass
 
@@ -367,13 +425,7 @@ class ResultHandler(PoolThread):
 
                 on_state_change(task)
 
-        # Notify waiting threads
-        if putlock is not None:
-            try:
-                putlock.release()
-            except ValueError:
-                pass
-
+        time_terminate = None
         while cache and self._state != TERMINATE:
             try:
                 ready, task = poll(0.2)
@@ -387,7 +439,19 @@ class ResultHandler(PoolThread):
                     continue
 
                 on_state_change(task)
-            join_exited_workers()
+            try:
+                join_exited_workers(shutdown=True)
+            except WorkersJoined:
+                now = time.time()
+                if not time_terminate:
+                    time_terminate = now
+                else:
+                    if now - time_terminate > 5.0:
+                        debug('result handler exiting: timed out')
+                        break
+                    debug('result handler: all workers terminated, '
+                          'timeout in %ss' % (
+                              abs(min(now - time_terminate - 5.0, 0))))
 
         if hasattr(outqueue, '_reader'):
             debug('ensuring that outqueue is not full')
@@ -429,9 +493,10 @@ class Pool(object):
         self._initializer = initializer
         self._initargs = initargs
 
-        if self.soft_timeout and SIG_SOFT_TIMEOUT is None:
-            raise NotImplementedError("Soft timeouts not supported: "
-                    "Your platform does not have the SIGUSR1 signal.")
+        if soft_timeout and SIG_SOFT_TIMEOUT is None:
+            warnings.warn(UserWarning("Soft timeouts are not supported: "
+                    "on this platform: It does not have the SIGUSR1 signal."))
+            soft_timeout = None
 
         if processes is None:
             try:
@@ -450,8 +515,7 @@ class Pool(object):
         self._worker_handler = self.Supervisor(self)
         self._worker_handler.start()
 
-        self._putlock = threading.BoundedSemaphore(self._processes)
-
+        self._putlock = LaxBoundedSemaphore(self._processes)
         self._task_handler = self.TaskHandler(self._taskqueue,
                                               self._quick_put,
                                               self._outqueue,
@@ -459,13 +523,10 @@ class Pool(object):
         self._task_handler.start()
 
         # Thread killing timedout jobs.
-        if self.timeout or self.soft_timeout:
-            self._timeout_handler = self.TimeoutHandler(
-                    self._pool, self._cache,
-                    self.soft_timeout, self.timeout)
-            self._timeout_handler.start()
-        else:
-            self._timeout_handler = None
+        self._timeout_handler = None
+        self._timeout_handler_mutex = threading.Lock()
+        if self.timeout is not None or self.soft_timeout is not None:
+            self._start_timeout_handler()
 
         # Thread processing results in the outqueue.
         self._result_handler = self.ResultHandler(self._outqueue,
@@ -497,31 +558,42 @@ class Pool(object):
         w.start()
         return w
 
-    def _join_exited_workers(self):
+    def _join_exited_workers(self, shutdown=False, lost_worker_timeout=10.0):
         """Cleanup after any worker processes which have exited due to
         reaching their specified lifetime. Returns True if any workers were
         cleaned up.
         """
+        now = None
+        # The worker may have published a result before being terminated,
+        # but we have no way to accurately tell if it did.  So we wait for
+        # 10 seconds before we mark the job with WorkerLostError.
+        for job in [job for job in self._cache.values()
+                if not job.ready() and job._worker_lost]:
+            now = now or time.time()
+            if now - job._worker_lost > lost_worker_timeout:
+                err = WorkerLostError("Worker exited prematurely.")
+                job._set(None, (False, err))
+
+        if shutdown and not len(self._pool):
+            raise WorkersJoined()
+
         cleaned = []
         for i in reversed(range(len(self._pool))):
             worker = self._pool[i]
             if worker.exitcode is not None:
                 # worker exited
-                debug('cleaning up worker %d' % i)
-                if self._putlock is not None:
-                    try:
-                        self._putlock.release()
-                    except ValueError:
-                        pass
+                debug('Supervisor: cleaning up worker %d' % i)
                 worker.join()
+                debug('Supervisor: worked %d joined' % i)
                 cleaned.append(worker.pid)
                 del self._pool[i]
         if cleaned:
             for job in self._cache.values():
                 for worker_pid in job.worker_pids():
-                    if worker_pid in cleaned:
-                        err = WorkerLostError("Worker exited prematurely.")
-                        job._set(None, (False, err))
+                    if worker_pid in cleaned and not job.ready():
+                        if self._putlock is not None:
+                            self._putlock.release()
+                        job._worker_lost = time.time()
                         continue
             return True
         return False
@@ -555,7 +627,7 @@ class Pool(object):
         for worker in self._pool:
             if not self._worker_active(worker):
                 yield worker
-        raise
+        raise StopIteration()
 
     def _worker_active(self, worker):
         for job in self._cache.values():
@@ -567,7 +639,6 @@ class Pool(object):
         """Bring the number of pool processes up to the specified number,
         for use after reaping workers which have exited.
         """
-        debug('repopulating pool')
         for i in range(self._processes - len(self._pool)):
             if self._state != RUN:
                 return
@@ -592,6 +663,19 @@ class Pool(object):
                 return True, self._quick_get()
             return False, None
         self._poll_result = _poll_result
+
+    def _start_timeout_handler(self):
+        # ensure more than one thread does not start the timeout handler
+        # thread at once.
+        self._timeout_handler_mutex.acquire()
+        try:
+            if self._timeout_handler is None:
+                self._timeout_handler = self.TimeoutHandler(
+                        self._pool, self._cache,
+                        self.soft_timeout, self.timeout)
+                self._timeout_handler.start()
+        finally:
+            self._timeout_handler_mutex.release()
 
     def apply(self, func, args=(), kwds={}):
         '''
@@ -646,7 +730,8 @@ class Pool(object):
 
     def apply_async(self, func, args=(), kwds={},
             callback=None, accept_callback=None, timeout_callback=None,
-            waitforslot=False, error_callback=None):
+            waitforslot=False, error_callback=None,
+            soft_timeout=None, timeout=None):
         '''
         Asynchronous equivalent of `apply()` builtin.
 
@@ -663,11 +748,21 @@ class Pool(object):
 
         '''
         assert self._state == RUN
+        if soft_timeout and SIG_SOFT_TIMEOUT is None:
+            warnings.warn(UserWarning("Soft timeouts are not supported: "
+                    "on this platform: It does not have the SIGUSR1 signal."))
+            soft_timeout = None
         result = ApplyResult(self._cache, callback,
                              accept_callback, timeout_callback,
-                             error_callback)
-        if waitforslot:
+                             error_callback, soft_timeout, timeout)
+
+        if waitforslot and self._putlock is not None:
             self._putlock.acquire()
+            if self._state != RUN:
+                return
+        if timeout or soft_timeout:
+            # start the timeout handler thread when required.
+            self._start_timeout_handler()
         self._taskqueue.put(([(result._job, None, func, args, kwds)], None))
         return result
 
@@ -713,6 +808,8 @@ class Pool(object):
             self._worker_handler.close()
             self._worker_handler.join()
             self._taskqueue.put(None)
+            if self._putlock:
+                self._putlock.clear()
 
     def terminate(self):
         debug('terminating pool')
@@ -728,6 +825,7 @@ class Pool(object):
         self._task_handler.join()
         debug('joining result handler')
         self._result_handler.join()
+        debug('result handler joined')
         for i, p in enumerate(self._pool):
             debug('joining worker %s/%s (%r)' % (i, len(self._pool), p, ))
             p.join()
@@ -756,8 +854,6 @@ class Pool(object):
 
         debug('helping task handler/workers to finish')
         cls._help_stuff_finish(inqueue, task_handler, len(pool))
-
-        assert result_handler.is_alive() or len(cache) == 0
 
         result_handler.terminate()
         outqueue.put(None)                  # sentinel
@@ -789,6 +885,7 @@ class Pool(object):
                     # worker has not yet exited
                     debug('cleaning up worker %d' % p.pid)
                     p.join()
+            debug('pool workers joined')
 DynamicPool = Pool
 
 #
@@ -797,9 +894,12 @@ DynamicPool = Pool
 
 
 class ApplyResult(object):
+    _worker_lost = None
 
     def __init__(self, cache, callback, accept_callback=None,
-            timeout_callback=None, error_callback=None):
+            timeout_callback=None, error_callback=None, soft_timeout=None,
+            timeout=None):
+        self._mutex = threading.Lock()
         self._cond = threading.Condition(threading.Lock())
         self._job = job_counter.next()
         self._cache = cache
@@ -808,6 +908,8 @@ class ApplyResult(object):
         self._accept_callback = accept_callback
         self._errback = error_callback
         self._timeout_callback = timeout_callback
+        self._timeout = timeout
+        self._soft_timeout = soft_timeout
 
         self._accepted = False
         self._worker_pid = None
@@ -845,28 +947,38 @@ class ApplyResult(object):
             raise self._value
 
     def _set(self, i, obj):
-        self._success, self._value = obj
-        if self._callback and self._success:
-            self._callback(self._value)
-        if self._errback and not self._success:
-            self._errback(self._value)
-        self._cond.acquire()
+        self._mutex.acquire()
         try:
-            self._ready = True
-            self._cond.notify()
+            self._success, self._value = obj
+            self._cond.acquire()
+            try:
+                self._ready = True
+                self._cond.notify()
+            finally:
+                self._cond.release()
+            if self._accepted:
+                self._cache.pop(self._job, None)
+
+            # apply callbacks last
+            if self._callback and self._success:
+                self._callback(self._value)
+            if self._errback and not self._success:
+                self._errback(self._value)
         finally:
-            self._cond.release()
-        if self._accepted:
-            self._cache.pop(self._job, None)
+            self._mutex.release()
 
     def _ack(self, i, time_accepted, pid):
-        self._accepted = True
-        self._time_accepted = time_accepted
-        self._worker_pid = pid
-        if self._accept_callback:
-            self._accept_callback()
-        if self._ready:
-            self._cache.pop(self._job, None)
+        self._mutex.acquire()
+        try:
+            self._accepted = True
+            self._time_accepted = time_accepted
+            self._worker_pid = pid
+            if self._ready:
+                self._cache.pop(self._job, None)
+            if self._accept_callback:
+                self._accept_callback(pid, time_accepted)
+        finally:
+            self._mutex.release()
 
 #
 # Class whose instances are returned by `Pool.map_async()`

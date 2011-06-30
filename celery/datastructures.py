@@ -1,18 +1,33 @@
-from __future__ import generators
+"""
+celery.datastructures
+=====================
+
+Custom data structures.
+
+:copyright: (c) 2009 - 2011 by Ask Solem.
+:license: BSD, see LICENSE for more details.
+
+"""
+from __future__ import absolute_import
 
 import time
 import traceback
 
 from itertools import chain
-from UserList import UserList
-from Queue import Queue, Empty as QueueEmpty
+from Queue import Empty
 
 from celery.utils.compat import OrderedDict
 
 
 class AttributeDictMixin(object):
+    """Adds attribute access to mappings.
+
+    `d.key -> d[key]`
+
+    """
 
     def __getattr__(self, key):
+        """`d.key -> d[key]`"""
         try:
             return self[key]
         except KeyError:
@@ -20,6 +35,7 @@ class AttributeDictMixin(object):
                     self.__class__.__name__, key))
 
     def __setattr__(self, key, value):
+        """`d[key] = value -> d.key = value`"""
         self[key] = value
 
 
@@ -29,7 +45,11 @@ class AttributeDict(dict, AttributeDictMixin):
 
 
 class DictAttribute(object):
-    """Dict interface using attributes."""
+    """Dict interface to attributes.
+
+    `obj[k] -> obj.k`
+
+    """
 
     def __init__(self, obj):
         self.obj = obj
@@ -63,30 +83,26 @@ class DictAttribute(object):
         return vars(self.obj).iteritems()
 
 
-class MultiDictView(AttributeDictMixin):
-    """View for one more more dicts.
+class ConfigurationView(AttributeDictMixin):
+    """A view over an applications configuration dicts.
 
-    * When getting a key, the dicts are searched in order.
-    * When setting a key, the key is added to the first dict.
+    If the key does not exist in ``changes``, the ``defaults`` dict
+    is consulted.
 
-    >>> d1 = {"x": 3"}
-    >>> d2 = {"x": 1, "y": 2, "z": 3}
-    >>> x = MultiDictView([d1, d2])
-
-    >>> x["x"]
-    3
-
-    >>>  x["y"]
-    2
+    :param changes:  Dict containing changes to the configuration.
+    :param defaults: Dict containing the default configuration.
 
     """
-    dicts = None
+    changes = None
+    defaults = None
+    _order = None
 
-    def __init__(self, *dicts):
-        self.__dict__["dicts"] = dicts
+    def __init__(self, changes, defaults):
+        self.__dict__.update(changes=changes, defaults=defaults,
+                             _order=[changes] + defaults)
 
     def __getitem__(self, key):
-        for d in self.__dict__["dicts"]:
+        for d in self._order:
             try:
                 return d[key]
             except KeyError:
@@ -94,7 +110,7 @@ class MultiDictView(AttributeDictMixin):
         raise KeyError(key)
 
     def __setitem__(self, key, value):
-        self.__dict__["dicts"][0][key] = value
+        self.changes[key] = value
 
     def get(self, key, default=None):
         try:
@@ -110,65 +126,49 @@ class MultiDictView(AttributeDictMixin):
             return default
 
     def update(self, *args, **kwargs):
-        return self.__dict__["dicts"][0].update(*args, **kwargs)
+        return self.changes.update(*args, **kwargs)
 
     def __contains__(self, key):
-        for d in self.__dict__["dicts"]:
+        for d in self._order:
             if key in d:
                 return True
         return False
 
     def __repr__(self):
-        return repr(dict(iter(self)))
+        return repr(dict(self.iteritems()))
 
     def __iter__(self):
-        return chain(*[d.iteritems() for d in self.__dict__["dicts"]])
+        return self.iterkeys()
 
+    def _iter(self, op):
+        # defaults must be first in the stream, so values in
+        # changes takes precedence.
+        return chain(*[op(d) for d in reversed(self._order)])
 
-class PositionQueue(UserList):
-    """A positional queue of a specific length, with slots that are either
-    filled or unfilled. When all of the positions are filled, the queue
-    is considered :meth:`full`.
+    def iterkeys(self):
+        return self._iter(lambda d: d.iterkeys())
 
-    :param length: Number of items to fill.
+    def iteritems(self):
+        return self._iter(lambda d: d.iteritems())
 
-    """
+    def itervalues(self):
+        return self._iter(lambda d: d.itervalues())
 
-    #: The number of items required for the queue to be considered full.
-    length = None
+    def keys(self):
+        return list(self.iterkeys())
 
-    class UnfilledPosition(object):
-        """Describes an unfilled slot."""
+    def items(self):
+        return list(self.iteritems())
 
-        def __init__(self, position):
-            # This is not used, but is an argument from xrange
-            # so why not.
-            self.position = position
-
-    def __init__(self, length):
-        self.length = length
-        self.data = map(self.UnfilledPosition, xrange(length))
-
-    def full(self):
-        """Returns :const:`True` if all of the slots has been filled."""
-        return len(self) >= self.length
-
-    def __len__(self):
-        """`len(self)` -> number of slots filled with real values."""
-        return len(self.filled)
-
-    @property
-    def filled(self):
-        """All filled slots as a list."""
-        return [slot for slot in self.data
-                    if not isinstance(slot, self.UnfilledPosition)]
+    def values(self):
+        return list(self.itervalues())
 
 
 class ExceptionInfo(object):
     """Exception wrapping an exception and its traceback.
 
-    :param exc_info: The exception tuple info as returned by
-        :func:`traceback.format_exception`.
+    :param exc_info: The exception info tuple as returned by
+        :func:`sys.exc_info`.
 
     """
 
@@ -179,7 +179,7 @@ class ExceptionInfo(object):
     traceback = None
 
     def __init__(self, exc_info):
-        type_, exception, tb = exc_info
+        _, exception, _ = exc_info
         self.exception = exception
         self.traceback = ''.join(traceback.format_exception(*exc_info))
 
@@ -187,10 +187,7 @@ class ExceptionInfo(object):
         return self.traceback
 
     def __repr__(self):
-        return "<%s.%s: %s>" % (
-                self.__class__.__module__,
-                self.__class__.__name__,
-                str(self.exception))
+        return "<ExceptionInfo: %r>" % (self.exception, )
 
 
 def consume_queue(queue):
@@ -199,7 +196,7 @@ def consume_queue(queue):
 
     The iterator stops as soon as the queue raises :exc:`Queue.Empty`.
 
-    Example
+    *Examples*
 
         >>> q = Queue()
         >>> map(q.put, range(4))
@@ -209,72 +206,12 @@ def consume_queue(queue):
         []
 
     """
+    get = queue.get_nowait
     while 1:
         try:
-            yield queue.get_nowait()
-        except QueueEmpty:
+            yield get()
+        except Empty:
             break
-
-
-class SharedCounter(object):
-    """Thread-safe counter.
-
-    Please note that the final value is not synchronized, this means
-    that you should not update the value by using a previous value, the only
-    reliable operations are increment and decrement.
-
-    Example::
-
-        >>> max_clients = SharedCounter(initial_value=10)
-
-        # Thread one
-        >>> max_clients += 1 # OK (safe)
-
-        # Thread two
-        >>> max_clients -= 3 # OK (safe)
-
-        # Main thread
-        >>> if client >= int(max_clients): # Max clients now at 8
-        ...    wait()
-
-        >>> max_client = max_clients + 10 # NOT OK (unsafe)
-
-    """
-
-    def __init__(self, initial_value):
-        self._value = initial_value
-        self._modify_queue = Queue()
-
-    def increment(self, n=1):
-        """Increment value."""
-        self += n
-        return int(self)
-
-    def decrement(self, n=1):
-        """Decrement value."""
-        self -= n
-        return int(self)
-
-    def _update_value(self):
-        self._value += sum(consume_queue(self._modify_queue))
-        return self._value
-
-    def __iadd__(self, y):
-        """`self += y`"""
-        self._modify_queue.put(y * +1)
-        return self
-
-    def __isub__(self, y):
-        """`self -= y`"""
-        self._modify_queue.put(y * -1)
-        return self
-
-    def __int__(self):
-        """`int(self) -> int`"""
-        return self._update_value()
-
-    def __repr__(self):
-        return "<SharedCounter: int(%s)>" % str(int(self))
 
 
 class LimitedSet(object):
@@ -285,10 +222,11 @@ class LimitedSet(object):
     consume too much resources.
 
     :keyword maxlen: Maximum number of members before we start
-                     deleting expired members.
+                     evicting expired members.
     :keyword expires: Time in seconds, before a membership expires.
 
     """
+    __slots__ = ("maxlen", "expires", "_data")
 
     def __init__(self, maxlen=None, expires=None):
         self.maxlen = maxlen
@@ -316,7 +254,7 @@ class LimitedSet(object):
                 if not self.expires or time.time() > when + self.expires:
                     try:
                         self.pop_value(value)
-                    except TypeError:                   # pragma: no cover
+                    except TypeError:  # pragma: no cover
                         continue
             break
 
@@ -377,10 +315,7 @@ class TokenBucket(object):
 
     .. admonition:: Thread safety
 
-        This implementation is not thread safe.
-
-    :param fill_rate: Refill rate in tokens/second.
-    :keyword capacity: Max number of tokens.  Default is 1.
+        This implementation may not be thread safe.
 
     """
 

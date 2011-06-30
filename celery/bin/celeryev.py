@@ -1,20 +1,32 @@
+from __future__ import absolute_import, with_statement
+
 import sys
 
+from functools import partial
+
 from celery import platforms
-from celery.bin.base import Command, Option
+from celery.platforms import detached
+from celery.bin.base import Command, Option, daemon_options
 
 
 class EvCommand(Command):
+    supports_args = False
 
     def run(self, dump=False, camera=None, frequency=1.0, maxrate=None,
-            loglevel="INFO", logfile=None, prog_name="celeryev", **kwargs):
+            loglevel="INFO", logfile=None, prog_name="celeryev",
+            pidfile=None, uid=None, gid=None, umask=None,
+            working_directory=None, detach=False, **kwargs):
         self.prog_name = prog_name
 
         if dump:
             return self.run_evdump()
         if camera:
-            return self.run_evcam(camera, frequency, maxrate,
-                                  loglevel=loglevel, logfile=logfile)
+            return self.run_evcam(camera, freq=frequency, maxrate=maxrate,
+                                  loglevel=loglevel, logfile=logfile,
+                                  pidfile=pidfile, uid=uid, gid=gid,
+                                  umask=umask,
+                                  working_directory=working_directory,
+                                  detach=detach)
         return self.run_evtop()
 
     def run_evdump(self):
@@ -27,11 +39,21 @@ class EvCommand(Command):
         self.set_process_status("top")
         return evtop(app=self.app)
 
-    def run_evcam(self, *args, **kwargs):
+    def run_evcam(self, camera, logfile=None, pidfile=None, uid=None,
+            gid=None, umask=None, working_directory=None,
+            detach=False, **kwargs):
         from celery.events.snapshot import evcam
+        workdir = working_directory
         self.set_process_status("cam")
         kwargs["app"] = self.app
-        return evcam(*args, **kwargs)
+        cam = partial(evcam, camera,
+                      logfile=logfile, pidfile=pidfile, **kwargs)
+
+        if detach:
+            with detached(logfile, pidfile, uid, gid, umask, workdir):
+                return cam()
+        else:
+            return cam()
 
     def set_process_status(self, prog, info=""):
         prog = "%s:%s" % (self.prog_name, prog)
@@ -46,6 +68,9 @@ class EvCommand(Command):
             Option('-c', '--camera',
                    action="store", dest="camera",
                    help="Camera class to take event snapshots with."),
+            Option('--detach',
+                default=False, action="store_true", dest="detach",
+                help="Recording: Detach and run in the background."),
             Option('-F', '--frequency', '--freq',
                    action="store", dest="frequency",
                    type="float", default=1.0,
@@ -56,10 +81,8 @@ class EvCommand(Command):
             Option('-l', '--loglevel',
                    action="store", dest="loglevel", default="INFO",
                    help="Loglevel. Default is WARNING."),
-            Option('-f', '--logfile',
-                   action="store", dest="logfile", default=None,
-                   help="Log file. Default is <stderr>"),
-        )
+        ) + daemon_options(default_pidfile="celeryev.pid",
+                           default_logfile=None)
 
 
 def main():

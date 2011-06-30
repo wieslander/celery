@@ -1,29 +1,40 @@
+# -*- coding: utf-8 -*-
 """
+celery.decorators✞
+==================
 
-Decorators
+Deprecated decorators, use `celery.task.task`,
+and `celery.task.periodic_task` instead.
+
+The new decorators does not support magic keyword arguments.
+
+:copyright: (c) 2009 - 2011 by Ask Solem.
+:license: BSD, see LICENSE for more details.
 
 """
-from celery.app import app_or_default
-from celery.task.base import PeriodicTask
+import warnings
+
+from celery import task as _task
 
 
-def task(*args, **kwargs):
-    return app_or_default().task(*args, **kwargs)
+warnings.warn(PendingDeprecationWarning("""
+The `celery.decorators` module and the magic keyword arguments
+are pending deprecation and will be deprecated in 2.4, then removed
+in 3.0.
+
+`task.request` should be used instead of magic keyword arguments,
+and `celery.task.task` used instead of `celery.decorators.task`.
+
+See the 2.2 Changelog for more information.
+
+"""))
 
 
-def periodic_task(**options):
-    """Task decorator to create a periodic task.
+def task(*args, **kwargs):  # ✞
+    kwargs.setdefault("accept_magic_kwargs", True)
+    return _task.task(*args, **kwargs)
 
-    Example task, scheduling a task once every day:
 
-    .. code-block:: python
-
-        from datetime import timedelta
-
-        @periodic_task(run_every=timedelta(days=1))
-        def cronjob(**kwargs):
-            logger = cronjob.get_logger(**kwargs)
-            logger.warn("Task running...")
-
-    """
-    return task(**dict({"base": PeriodicTask}, **options))
+def periodic_task(*args, **kwargs):  # ✞
+    kwargs.setdefault("accept_magic_kwargs", True)
+    return _task.periodic_task(*args, **kwargs)

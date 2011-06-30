@@ -1,24 +1,65 @@
-from __future__ import generators
+from __future__ import absolute_import, with_statement
 
 import os
 import sys
+import operator
+import imp as _imp
 import importlib
 import logging
-import operator
-import paramiko
-import subprocess
+import threading
+import traceback
+import warnings
 
+from contextlib import contextmanager
+from functools import partial, wraps
 from inspect import getargspec
 from itertools import islice
+from pprint import pprint
 
-from kombu.utils import gen_unique_id, rpartition
+from kombu.utils import cached_property, gen_unique_id  # noqa
 
-from celery.utils.functional import partial
-
+from celery.utils.compat import StringIO
 
 LOG_LEVELS = dict(logging._levelNames)
 LOG_LEVELS["FATAL"] = logging.FATAL
 LOG_LEVELS[logging.FATAL] = "FATAL"
+
+PENDING_DEPRECATION_FMT = """
+    %(description)s is scheduled for deprecation in \
+    version %(deprecation)s and removal in version v%(removal)s. \
+    %(alternative)s
+"""
+
+DEPRECATION_FMT = """
+    %(description)s is deprecated and scheduled for removal in
+    version %(removal)s. %(alternative)s
+"""
+
+
+def deprecated(description=None, deprecation=None, removal=None,
+        alternative=None):
+
+    def _inner(fun):
+
+        @wraps(fun)
+        def __inner(*args, **kwargs):
+            ctx = {"description": description or get_full_cls_name(fun),
+                   "deprecation": deprecation, "removal": removal,
+                   "alternative": alternative}
+            if deprecation is not None:
+                w = PendingDeprecationWarning(PENDING_DEPRECATION_FMT % ctx)
+            else:
+                w = DeprecationWarning(DEPRECATION_FMT % ctx)
+            warnings.warn(w)
+            return fun(*args, **kwargs)
+        return __inner
+    return _inner
+
+
+def lpmerge(L, R):
+    """Left precedent dictionary merge.  Keeps values from `l`, if the value
+    in `r` is :const:`None`."""
+    return dict(L, **dict((k, v) for k, v in R.iteritems() if v is not None))
 
 
 class RestartStrategy(object):
@@ -28,6 +69,7 @@ class RestartStrategy(object):
         self.options = options
 
     def __call__(self):
+        import subprocess
         return subprocess.call(self.argv, **self.options) == 0
 
 
@@ -44,16 +86,12 @@ class SSHRestartStrategy(object):
         stdin, stdout, stderr = client.exec_command(self.argv)
 
     def connect(self):
+        import paramiko
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(self.host,
                        username=self.username,
                        password=self.password)
-
-
-
-
-
 
 
 class promise(object):
@@ -89,6 +127,9 @@ class promise(object):
         if isinstance(rhs, self.__class__):
             return -cmp(rhs, self())
         return cmp(self(), rhs)
+
+    def __eq__(self, rhs):
+        return self() == rhs
 
     def __deepcopy__(self, memo):
         memo[id(self)] = self
@@ -219,12 +260,6 @@ def is_iterable(obj):
     return True
 
 
-def mitemgetter(*items):
-    """Like :func:`operator.itemgetter` but returns :const:`None`
-    on missing items instead of raising :exc:`KeyError`."""
-    return lambda container: map(container.get, items)
-
-
 def mattrgetter(*attrs):
     """Like :func:`operator.itemgetter` but returns :const:`None` on missing
     attributes instead of raising :exc:`AttributeError`."""
@@ -304,8 +339,11 @@ def get_cls_by_name(name, aliases={}, imp=None):
         return name                                 # already a class
 
     name = aliases.get(name) or name
-    module_name, _, cls_name = rpartition(name, ".")
-    module = imp(module_name)
+    module_name, _, cls_name = name.rpartition(".")
+    try:
+        module = imp(module_name)
+    except ValueError, exc:
+        raise ValueError("Couldn't import %r: %s" % (name, exc))
     return getattr(module, cls_name)
 
 get_symbol_by_name = get_cls_by_name
@@ -339,8 +377,8 @@ def abbrtask(S, max):
     if S is None:
         return "???"
     if len(S) > max:
-        module, _, cls = rpartition(S, ".")
-        module = abbr(module, max - len(cls), False)
+        module, _, cls = S.rpartition(".")
+        module = abbr(module, max - len(cls) - 3, False)
         return module + "[.]" + cls
     return S
 
@@ -356,6 +394,37 @@ def textindent(t, indent=0):
         return "\n".join(" " * indent + p for p in t.split("\n"))
 
 
+@contextmanager
+def cwd_in_path():
+    cwd = os.getcwd()
+    if cwd in sys.path:
+        yield
+    else:
+        sys.path.insert(0, cwd)
+        try:
+            yield cwd
+        finally:
+            try:
+                sys.path.remove(cwd)
+            except ValueError:
+                pass
+
+
+def find_module(module, path=None, imp=None):
+    """Version of :func:`imp.find_module` supporting dots."""
+    if imp is None:
+        imp = importlib.import_module
+    with cwd_in_path():
+        if "." in module:
+            last = None
+            parts = module.split(".")
+            for i, part in enumerate(parts[:-1]):
+                path = imp(".".join(parts[:i + 1])).__path__
+                last = _imp.find_module(parts[i + 1], path)
+            return last
+        return _imp.find_module(module)
+
+
 def import_from_cwd(module, imp=None):
     """Import module, but make sure it finds modules
     located in the current directory.
@@ -365,14 +434,43 @@ def import_from_cwd(module, imp=None):
     """
     if imp is None:
         imp = importlib.import_module
-    cwd = os.getcwd()
-    if cwd in sys.path:
+    with cwd_in_path():
         return imp(module)
-    sys.path.insert(0, cwd)
-    try:
-        return imp(module)
-    finally:
-        try:
-            sys.path.remove(cwd)
-        except ValueError:
-            pass
+
+
+def cry():  # pragma: no cover
+    """Return stacktrace of all active threads.
+
+    From https://gist.github.com/737056
+
+    """
+    tmap = {}
+    main_thread = None
+    # get a map of threads by their ID so we can print their names
+    # during the traceback dump
+    for t in threading.enumerate():
+        if getattr(t, "ident", None):
+            tmap[t.ident] = t
+        else:
+            main_thread = t
+
+    out = StringIO()
+    sep = "=" * 49 + "\n"
+    for tid, frame in sys._current_frames().iteritems():
+        thread = tmap.get(tid, main_thread)
+        out.write("%s\n" % (thread.getName(), ))
+        out.write(sep)
+        traceback.print_stack(frame, file=out)
+        out.write(sep)
+        out.write("LOCAL VARIABLES\n")
+        out.write(sep)
+        pprint(frame.f_locals, stream=out)
+        out.write("\n\n")
+    return out.getvalue()
+
+
+def reprcall(name, args=(), kwargs=(), sep=', ',
+        kwformat=lambda i: "%s=%r" % i):
+    return "%s(%s%s%s)" % (name, sep.join(map(repr, args)),
+                           kwargs and sep or "",
+                           sep.join(map(kwformat, kwargs.iteritems())))

@@ -27,7 +27,7 @@ For a full list of available command line options see
 
 You can also start multiple workers on the same machine. If you do so
 be sure to give a unique name to each individual worker by specifying a
-hostname with the `--hostname|-n` argument::
+host name with the :option:`--hostname|-n` argument::
 
     $ celeryd --loglevel=INFO --concurrency=10 -n worker1.example.com
     $ celeryd --loglevel=INFO --concurrency=10 -n worker2.example.com
@@ -75,17 +75,20 @@ arguments as it was started with.
 Concurrency
 ===========
 
-Multiprocessing is used to perform concurrent execution of tasks.  The number
-of worker processes can be changed using the `--concurrency` argument and
-defaults to the number of CPUs available on the machine.
+By default multiprocessing is used to perform concurrent execution of tasks,
+but you can also use :ref:`Eventlet <concurrency-eventlet>`.  The number
+of worker processes/threads can be changed using the :option:`--concurrency`
+argument and defaults to the number of CPUs available on the machine.
 
-More worker processes are usually better, but there's a cut-off point where
-adding more processes affects performance in negative ways.
-There is even some evidence to support that having multiple celeryd's running,
-may perform better than having a single worker.  For example 3 celeryd's with
-10 worker processes each.  You need to experiment to find the numbers that
-works best for you, as this varies based on application, work load, task
-run times and other factors.
+.. admonition:: Number of processes (multiprocessing)
+
+    More worker processes are usually better, but there's a cut-off point where
+    adding more processes affects performance in negative ways.
+    There is even some evidence to support that having multiple celeryd's running,
+    may perform better than having a single worker.  For example 3 celeryd's with
+    10 worker processes each.  You need to experiment to find the numbers that
+    works best for you, as this varies based on application, work load, task
+    run times and other factors.
 
 .. _worker-persistent-revokes:
 
@@ -120,7 +123,7 @@ time limit kills it:
 
 .. code-block:: python
 
-    from celery.decorators import task
+    from celery.task import task
     from celery.exceptions import SoftTimeLimitExceeded
 
     @task()
@@ -135,7 +138,27 @@ Time limits can also be set using the :setting:`CELERYD_TASK_TIME_LIMIT` /
 
 .. note::
 
-    Time limits does not currently work on Windows.
+    Time limits do not currently work on Windows and other
+    platforms that do not support the ``SIGUSR1`` signal.
+
+
+Changing time limits at runtime
+-------------------------------
+.. versionadded:: 2.3
+
+You can change the soft and hard time limits for a task by using the
+``time_limit`` remote control command.
+
+Example changing the time limit for the ``tasks.crawl_the_web`` task
+to have a soft time limit of one minute, and a hard time limit of
+two minutes::
+
+    >>> from celery.task import control
+    >>> control.time_limit("tasks.crawl_the_web",
+                           soft=60, hard=120, reply=True)
+    [{'worker1.example.com': {'ok': 'time limits set successfully'}}]
+
+Only tasks that starts executing after the time limit change will be affected.
 
 .. _worker-maxtasksperchild:
 
@@ -181,7 +204,7 @@ to the number of destination hosts.
 .. seealso::
 
     The :program:`celeryctl` program is used to execute remote control
-    commands from the commandline.  It supports all of the commands
+    commands from the command line.  It supports all of the commands
     listed below.  See :ref:`monitoring-celeryctl` for more information.
 
 .. _worker-broadcast-fun:
@@ -231,7 +254,7 @@ Rate limits
 -----------
 
 Example changing the rate limit for the `myapp.mytask` task to accept
-200 tasks a minute on all servers:
+200 tasks a minute on all servers::
 
     >>> from celery.task.control import rate_limit
     >>> rate_limit("myapp.mytask", "200/m")
@@ -247,6 +270,39 @@ destination hostname::
     This won't affect workers with the
     :setting:`CELERY_DISABLE_RATE_LIMITS` setting on. To re-enable rate limits
     then you have to restart the worker.
+
+.. control:: revoke
+
+Revoking tasks
+--------------
+
+All worker nodes keeps a memory of revoked task ids, either in-memory or
+persistent on disk (see :ref:`worker-persistent-revokes`).
+
+When a worker receives a revoke request it will skip executing
+the task, but it won't terminate an already executing task unless
+the `terminate` option is set.
+
+If `terminate` is set the worker child process processing the task
+will be terminated.  The default signal sent is `TERM`, but you can
+specify this using the `signal` argument.  Signal can be the uppercase name
+of any signal defined in the :mod:`signal` module in the Python Standard
+Library.
+
+Terminating a task also revokes it.
+
+**Example**
+
+::
+
+    >>> from celery.task.control import revoke
+    >>> revoke("d9078da5-9915-40a0-bfa1-392c7bde42ed")
+
+    >>> revoke("d9078da5-9915-40a0-bfa1-392c7bde42ed",
+    ...        terminate=True)
+
+    >>> revoke("d9078da5-9915-40a0-bfa1-392c7bde42ed",
+    ...        terminate=True, signal="SIGKILL")
 
 .. control:: shutdown
 

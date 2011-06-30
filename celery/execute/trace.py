@@ -1,3 +1,5 @@
+from __future__ import absolute_import
+
 import sys
 import traceback
 
@@ -9,6 +11,7 @@ from celery.datastructures import ExceptionInfo
 
 
 class TraceInfo(object):
+
     def __init__(self, status=states.PENDING, retval=None, exc_info=None):
         self.status = status
         self.retval = retval
@@ -22,26 +25,35 @@ class TraceInfo(object):
             self.strtb = "\n".join(traceback.format_exception(*exc_info))
 
     @classmethod
-    def trace(cls, fun, args, kwargs):
+    def trace(cls, fun, args, kwargs, propagate=False):
         """Trace the execution of a function, calling the appropiate callback
-        if the function raises retry, an failure or returned successfully."""
+        if the function raises retry, an failure or returned successfully.
+
+        :keyword propagate: If true, errors will propagate to the caller.
+
+        """
         try:
             return cls(states.SUCCESS, retval=fun(*args, **kwargs))
-        except (SystemExit, KeyboardInterrupt):
-            raise
         except RetryTaskError, exc:
             return cls(states.RETRY, retval=exc, exc_info=sys.exc_info())
         except Exception, exc:
+            if propagate:
+                raise
             return cls(states.FAILURE, retval=exc, exc_info=sys.exc_info())
-        except:
-            # For Python2.4 where raising strings are still allowed.
+        except BaseException, exc:
+            raise
+        except:  # pragma: no cover
+            # For Python2.5 where raising strings are still allowed
+            # (but deprecated)
+            if propagate:
+                raise
             return cls(states.FAILURE, retval=None, exc_info=sys.exc_info())
 
 
 class TaskTrace(object):
 
     def __init__(self, task_name, task_id, args, kwargs, task=None,
-            request=None, **_):
+            request=None, propagate=None, **_):
         self.task_id = task_id
         self.task_name = task_name
         self.args = args
@@ -50,6 +62,7 @@ class TaskTrace(object):
         self.request = request or {}
         self.status = states.PENDING
         self.strtb = None
+        self.propagate = propagate
         self._trace_handlers = {states.FAILURE: self.handle_failure,
                                 states.RETRY: self.handle_retry,
                                 states.SUCCESS: self.handle_success}
@@ -72,20 +85,22 @@ class TaskTrace(object):
         return retval
 
     def _trace(self):
-        trace = TraceInfo.trace(self.task, self.args, self.kwargs)
+        trace = TraceInfo.trace(self.task, self.args, self.kwargs,
+                                propagate=self.propagate)
         self.status = trace.status
         self.strtb = trace.strtb
+        handler = self._trace_handlers[trace.status]
+        r = handler(trace.retval, trace.exc_type, trace.tb, trace.strtb)
         self.handle_after_return(trace.status, trace.retval,
                                  trace.exc_type, trace.tb, trace.strtb)
-        handler = self._trace_handlers[trace.status]
-        return handler(trace.retval, trace.exc_type, trace.tb, trace.strtb)
+        return r
 
-    def handle_after_return(self, status, retval, type_, tb, strtb):
-        einfo = None
+    def handle_after_return(self, status, retval, type_, tb, strtb,
+            einfo=None):
         if status in states.EXCEPTION_STATES:
             einfo = ExceptionInfo((retval, type_, tb))
         self.task.after_return(status, retval, self.task_id,
-                               self.args, self.kwargs, einfo=einfo)
+                               self.args, self.kwargs, einfo)
 
     def handle_success(self, retval, *args):
         """Handle successful execution."""
@@ -94,23 +109,22 @@ class TaskTrace(object):
 
     def handle_retry(self, exc, type_, tb, strtb):
         """Handle retry exception."""
-
         # Create a simpler version of the RetryTaskError that stringifies
         # the original exception instead of including the exception instance.
-        # This is for reporting the retry in logs, e-mail etc, while
+        # This is for reporting the retry in logs, email etc, while
         # guaranteeing pickleability.
         message, orig_exc = exc.args
         expanded_msg = "%s: %s" % (message, str(orig_exc))
-        einfo = ExceptionInfo((type_,
-                               type_(expanded_msg, None),
-                               tb))
-        self.task.on_retry(exc, self.task_id,
-                           self.args, self.kwargs, einfo=einfo)
+        einfo = ExceptionInfo((type_, type_(expanded_msg, None), tb))
+        self.task.on_retry(exc, self.task_id, self.args, self.kwargs, einfo)
         return einfo
 
     def handle_failure(self, exc, type_, tb, strtb):
         """Handle exception."""
         einfo = ExceptionInfo((type_, exc, tb))
-        self.task.on_failure(exc, self.task_id,
-                             self.args, self.kwargs, einfo=einfo)
+        self.task.on_failure(exc, self.task_id, self.args, self.kwargs, einfo)
+        signals.task_failure.send(sender=self.task, task_id=self.task_id,
+                                  exception=exc, args=self.args,
+                                  kwargs=self.kwargs, traceback=tb,
+                                  einfo=einfo)
         return einfo

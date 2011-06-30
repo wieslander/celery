@@ -1,6 +1,9 @@
+import sys
 from paver.easy import *
 from paver import doctools
 from paver.setuputils import setup
+
+PYCOMPILE_CACHES = ["*.pyc", "*$py.class"]
 
 options(
         sphinx=Bunch(builddir=".build"),
@@ -49,7 +52,8 @@ def ghdocs(options):
 @needs("clean_docs", "paver.doctools.html")
 def upload_pypi_docs(options):
     builtdocs = path("docs") / options.builddir / "html"
-    sh("python setup.py upload_sphinx --upload-dir='%s'" % (builtdocs))
+    sh("%s setup.py upload_sphinx --upload-dir='%s'" % (
+        sys.executable, builtdocs))
 
 
 @task
@@ -69,21 +73,23 @@ def verifyindex(options):
 
 
 @task
+def verifyconfigref(options):
+    sh("PYTHONPATH=. %s contrib/release/verify_config_reference.py \
+            docs/configuration.rst" % (sys.executable, ))
+
+
+@task
 @cmdopts([
     ("noerror", "E", "Ignore errors"),
 ])
-def flakes(options):
+def flake8(options):
     noerror = getattr(options, "noerror", False)
-    sh("""find celery -name '*.py' | xargs pyflakes | perl -mstrict -nle'
-           my $flake = $_;open(my $f, "contrib/release/flakesignore.txt");
-           my $ignored = 0;
-           PATTERN: foreach my $p (<$f>) { chomp($p);
-               if ($p && $flake =~ /$p/m) {
-                   $ignored = 1; last PATTERN; } } close($f);
-           if (! $ignored) { print $flake; our $FOUND_FLAKE = 1; }
-       }{exit $FOUND_FLAKE;
-            '""", ignore_error=noerror)
-
+    complexity = getattr(options, "complexity", 22)
+    sh("""flake8 celery | perl -mstrict -mwarnings -nle'
+        my $ignore = m/too complex \((\d+)\)/ && $1 le %s;
+        if (! $ignore) { print STDERR; our $FOUND_FLAKE = 1 }
+    }{exit $FOUND_FLAKE;
+        '""" % (complexity, ), ignore_error=noerror)
 
 @task
 def clean_readme(options):
@@ -94,8 +100,8 @@ def clean_readme(options):
 @task
 @needs("clean_readme")
 def readme(options):
-    sh("python contrib/release/sphinx-to-rst.py docs/templates/readme.txt \
-            > README.rst")
+    sh("%s contrib/release/sphinx-to-rst.py docs/templates/readme.txt \
+            > README.rst" % (sys.executable, ))
     sh("ln -sf README.rst README")
 
 
@@ -133,7 +139,8 @@ def pep8(options):
 
 @task
 def removepyc(options):
-    sh("find . -name '*.pyc' | xargs rm")
+    sh("find . -type f -a \\( %s \\) | xargs rm" % (
+        " -o ".join("-name '%s'" % (pat, ) for pat in PYCOMPILE_CACHES), ))
 
 
 @task
@@ -149,7 +156,8 @@ def gitcleanforce(options):
 
 
 @task
-@needs("pep8", "flakes", "autodoc", "verifyindex", "test", "gitclean")
+@needs("flake8", "autodoc", "verifyindex",
+       "verifyconfigref", "test", "gitclean")
 def releaseok(options):
     pass
 
@@ -158,3 +166,18 @@ def releaseok(options):
 @needs("releaseok", "removepyc", "upload_docs")
 def release(options):
     pass
+
+
+@task
+def coreloc(options):
+    sh("xargs sloccount < contrib/release/core-modules.txt")
+
+
+@task
+def testloc(options):
+    sh("sloccount celery/tests")
+
+
+@task
+def loc(options):
+    sh("sloccount celery")

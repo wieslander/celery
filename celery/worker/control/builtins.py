@@ -1,21 +1,33 @@
 import sys
+
 from datetime import datetime
 
+from celery.platforms import signals as _signals
 from celery.registry import tasks
-from celery.utils import timeutils, LOG_LEVELS
+from celery.utils import timeutils
 from celery.worker import state
 from celery.worker.state import revoked
 from celery.worker.control.registry import Panel
+from celery.utils.encoding import safe_repr
 
 TASK_INFO_FIELDS = ("exchange", "routing_key", "rate_limit")
 
 
 @Panel.register
-def revoke(panel, task_id, **kwargs):
+def revoke(panel, task_id, terminate=False, signal=None, **kwargs):
     """Revoke task by task id."""
     revoked.add(task_id)
-    panel.logger.warn("Task %s revoked" % (task_id, ))
-    return {"ok": "task %s revoked" % (task_id, )}
+    action = "revoked"
+    if terminate:
+        signum = _signals.signum(signal or "TERM")
+        for request in state.active_requests:
+            if request.task_id == task_id:
+                action = "terminated (%s)" % (signum, )
+                request.terminate(panel.consumer.pool, signal=signum)
+                break
+
+    panel.logger.info("Task %s %s." % (task_id, action))
+    return {"ok": "task %s %s" % (task_id, action)}
 
 
 @Panel.register
@@ -23,7 +35,8 @@ def enable_events(panel):
     dispatcher = panel.consumer.event_dispatcher
     if "task" not in dispatcher.domains:
         dispatcher.domains.add("task")
-        panel.logger.warn("Task events enabled by remote.")
+        dispatcher.enable()
+        panel.logger.info("Task events enabled by remote.")
         return {"ok": "task events enabled"}
     return {"ok": "task events already enabled"}
 
@@ -33,18 +46,16 @@ def disable_events(panel):
     dispatcher = panel.consumer.event_dispatcher
     if "task" in dispatcher.domains:
         dispatcher.domains.discard("task")
-        panel.logger.warn("Task events disabled by remote.")
+        panel.logger.info("Task events disabled by remote.")
         return {"ok": "task events disabled"}
     return {"ok": "task events already disabled"}
 
 
 @Panel.register
-def set_loglevel(panel, loglevel=None):
-    if loglevel is not None:
-        if not isinstance(loglevel, int):
-            loglevel = LOG_LEVELS[loglevel.upper()]
-        panel.app.log.get_default_logger(loglevel=loglevel)
-    return {"ok": loglevel}
+def heartbeat(panel):
+    panel.logger.debug("Heartbeat requested by remote.")
+    dispatcher = panel.consumer.event_dispatcher
+    dispatcher.send("worker-heartbeat", **state.SOFTWARE_INFO)
 
 
 @Panel.register
@@ -77,13 +88,31 @@ def rate_limit(panel, task_name, rate_limit, **kwargs):
     panel.consumer.ready_queue.refresh()
 
     if not rate_limit:
-        panel.logger.warn("Disabled rate limits for tasks of type %s" % (
+        panel.logger.info("Disabled rate limits for tasks of type %s" % (
                             task_name, ))
         return {"ok": "rate limit disabled successfully"}
 
-    panel.logger.warn("New rate limit for tasks of type %s: %s." % (
+    panel.logger.info("New rate limit for tasks of type %s: %s." % (
                 task_name, rate_limit))
     return {"ok": "new rate limit set successfully"}
+
+
+@Panel.register
+def time_limit(panel, task_name=None, hard=None, soft=None, **kwargs):
+    try:
+        task = tasks[task_name]
+    except KeyError:
+        panel.logger.error(
+            "Change time limit attempt for unknown task %s" % (task_name, ))
+        return {"error": "unknown task"}
+
+    task.soft_time_limit = soft
+    task.time_limit = hard
+
+    panel.logger.info(
+        "New time limits for tasks of type %s: soft=%s hard=%s" % (
+            task_name, soft, hard))
+    return {"ok": "time limits set successfully"}
 
 
 @Panel.register
@@ -98,7 +127,7 @@ def dump_schedule(panel, safe=False, **kwargs):
             item["priority"],
             item["item"])
     info = map(formatitem, enumerate(schedule.info()))
-    panel.logger.info("* Dump of current schedule:\n%s" % (
+    panel.logger.debug("* Dump of current schedule:\n%s" % (
                             "\n".join(info, )))
     scheduled_tasks = []
     for item in schedule.info():
@@ -116,8 +145,8 @@ def dump_reserved(panel, safe=False, **kwargs):
     if not reserved:
         panel.logger.info("--Empty queue--")
         return []
-    panel.logger.info("* Dump of currently reserved tasks:\n%s" % (
-                            "\n".join(map(repr, reserved), )))
+    panel.logger.debug("* Dump of currently reserved tasks:\n%s" % (
+                            "\n".join(map(safe_repr, reserved), )))
     return [request.info(safe=safe)
             for request in reserved]
 
@@ -154,8 +183,8 @@ def dump_tasks(panel, **kwargs):
 
     info = map(_extract_info, (tasks[task]
                                         for task in sorted(tasks.keys())))
-    panel.logger.warn("* Dump of currently registered tasks:\n%s" % (
-                "\n".join(info)))
+    panel.logger.debug("* Dump of currently registered tasks:\n%s" % (
+                    "\n".join(info)))
 
     return info
 
@@ -167,19 +196,19 @@ def ping(panel, **kwargs):
 
 @Panel.register
 def pool_grow(panel, n=1, **kwargs):
-    panel.listener.pool.grow(n)
+    panel.consumer.pool.grow(n)
     return {"ok": "spawned worker processes"}
 
 
 @Panel.register
 def pool_shrink(panel, n=1, **kwargs):
-    panel.listener.pool.shrink(n)
+    panel.consumer.pool.shrink(n)
     return {"ok": "terminated worker processes"}
 
 
 @Panel.register
 def shutdown(panel, **kwargs):
-    panel.logger.critical("Got shutdown from remote.")
+    panel.logger.warning("Got shutdown from remote.")
     raise SystemExit("Got shutdown from remote")
 
 
@@ -203,3 +232,10 @@ def cancel_consumer(panel, queue=None, **_):
     cset = panel.consumer.task_consumer
     cset.cancel_by_queue(queue)
     return {"ok": "no longer consuming from %s" % (queue, )}
+
+
+@Panel.register
+def active_queues(panel):
+    """Returns the queues associated with each worker."""
+    return [dict(queue.as_dict(recurse=True))
+                    for queue in panel.consumer.task_consumer.queues]

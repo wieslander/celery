@@ -3,8 +3,6 @@ import math
 from datetime import datetime, timedelta
 from dateutil.parser import parse as parse_iso8601
 
-from kombu.utils import partition
-
 DAYNAMES = "sun", "mon", "tue", "wed", "thu", "fri", "sat"
 WEEKDAYS = dict((name, dow) for name, dow in zip(DAYNAMES, range(7)))
 
@@ -20,7 +18,14 @@ TIME_UNITS = (("day", 60 * 60 * 24, lambda n: int(math.ceil(n))),
               ("second", 1, lambda n: "%.2f" % n))
 
 
-def timedelta_seconds(delta):
+def maybe_timedelta(delta):
+    """Coerces integer to timedelta if `delta` is an integer."""
+    if isinstance(delta, (int, float)):
+        return timedelta(seconds=delta)
+    return delta
+
+
+def timedelta_seconds(delta):  # pragma: no cover
     """Convert :class:`datetime.timedelta` to seconds.
 
     Doesn't account for negative values.
@@ -83,7 +88,7 @@ def rate(rate):
     and converts them to seconds."""
     if rate:
         if isinstance(rate, basestring):
-            ops, _, modifier = partition(rate, "/")
+            ops, _, modifier = rate.partition("/")
             return RATE_MODIFIER_MAP[modifier or "s"](int(ops)) or 0
         return rate or 0
     return 0

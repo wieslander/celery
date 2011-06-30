@@ -1,8 +1,8 @@
 .. _guide-monitoring:
 
-==================
- Monitoring Guide
-==================
+=================================
+ Monitoring and Management Guide
+=================================
 
 .. contents::
     :local:
@@ -22,6 +22,7 @@ Workers
 
 .. _monitoring-celeryctl:
 
+
 celeryctl: Management Utility
 -----------------------------
 
@@ -30,7 +31,7 @@ celeryctl: Management Utility
 :mod:`~celery.bin.celeryctl` is a command line utility to inspect
 and manage worker nodes (and to some degree tasks).
 
-To list all the commands avaialble do::
+To list all the commands available do::
 
     $ celeryctl help
 
@@ -53,6 +54,15 @@ Commands
 
     Note that you can omit the name of the task as long as the
     task doesn't use a custom result backend.
+
+* **purge**: Purge messages from all configured task queues.
+    ::
+
+        $ celeryctl purge
+
+    .. warning::
+        There is no undo for this operation, and messages will
+        be permanently deleted!
 
 * **inspect active**: List active tasks
     ::
@@ -88,7 +98,7 @@ Commands
 
         $ celeryctl inspect registered_tasks
 
-* **inspect states**: Show worker statistics
+* **inspect stats**: Show worker statistics
     ::
 
         $ celeryctl inspect stats
@@ -106,9 +116,9 @@ Commands
 
 .. note::
 
-    All `inspect` commands supports a `--timeout` argument,
+    All ``inspect`` commands supports a ``--timeout`` argument,
     This is the number of seconds to wait for responses.
-    You may have to increase this timeout if you're getting empty responses
+    You may have to increase this timeout if you're not getting a response
     due to latency.
 
 .. _celeryctl-inspect-destination:
@@ -179,21 +189,21 @@ Shutter frequency
 
 By default the camera takes a snapshot every second, if this is too frequent
 or you want to have higher precision, then you can change this using the
-`--frequency` argument.  This is a float describing how often, in seconds,
+``--frequency`` argument.  This is a float describing how often, in seconds,
 it should wake up to check if there are any new events::
 
     $ python manage.py celerycam --frequency=3.0
 
-The camera also supports rate limiting using the `--maxrate` argument.
+The camera also supports rate limiting using the ``--maxrate`` argument.
 While the frequency controls how often the camera thread wakes up,
 the rate limit controls how often it will actually take a snapshot.
 
 The rate limits can be specified in seconds, minutes or hours
 by appending `/s`, `/m` or `/h` to the value.
-Example: `--maxrate=100/m`, means "hundred writes a minute".
+Example: ``--maxrate=100/m``, means "hundred writes a minute".
 
 The rate limit is off by default, which means it will take a snapshot
-for every `--frequency` seconds.
+for every ``--frequency`` seconds.
 
 The events also expire after some time, so the database doesn't fill up.
 Successful tasks are deleted after 1 day, failed tasks after 3 days,
@@ -205,7 +215,7 @@ Using outside of Django
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 `django-celery` also installs the :program:`djcelerymon` program. This
-can be used by non-Django users, and runs both a webserver and a snapshot
+can be used by non-Django users, and runs both a web server and a snapshot
 camera in the same process.
 
 **Installing**
@@ -220,8 +230,8 @@ or using :program:`easy_install`::
 
 **Running**
 
-:program:`djcelerymon` reads configuration from your Celery config module,
-and sets up the Django environment using the same settings::
+:program:`djcelerymon` reads configuration from your Celery configuration
+module, and sets up the Django environment using the same settings::
 
     $ djcelerymon
 
@@ -233,7 +243,7 @@ user running the monitor.
 If you want to store the events in a different database, e.g. MySQL,
 then you can configure the `DATABASE*` settings directly in your Celery
 config module.  See http://docs.djangoproject.com/en/dev/ref/settings/#databases
-for more information about the database options avaialble.
+for more information about the database options available.
 
 You will also be asked to create a superuser (and you need to create one
 to be able to log into the admin later)::
@@ -246,7 +256,7 @@ to be able to log into the admin later)::
     have any superusers defined.  Would you like to create
     one now? (yes/no): yes
     Username (Leave blank to use 'username'): username
-    E-mail address: me@example.com
+    Email address: me@example.com
     Password: ******
     Password (again): ******
     Superuser created successfully.
@@ -260,7 +270,7 @@ Now that the service is started you can visit the monitor
 at http://127.0.0.1:8000, and log in using the user you created.
 
 For a list of the command line options supported by :program:`djcelerymon`,
-please see `djcelerymon --help`.
+please see ``djcelerymon --help``.
 
 .. _monitoring-celeryev:
 
@@ -282,11 +292,11 @@ down workers.
 
     $ celeryev --camera=<camera-class> --frequency=1.0
 
-and it includes a tool to dump events to stdout::
+and it includes a tool to dump events to :file:`stdout`::
 
     $ celeryev --dump
 
-For a complete list of options use `--help`::
+For a complete list of options use ``--help``::
 
     $ celeryev --help
 
@@ -317,15 +327,15 @@ RabbitMQ can be monitored.
 
 RabbitMQ ships with the `rabbitmqctl(1)`_ command,
 with this you can list queues, exchanges, bindings,
-queue lenghts, the memory usage of each queue, as well
+queue lengths, the memory usage of each queue, as well
 as manage users, virtual hosts and their permissions.
 
 .. note::
 
-    The default virtual host (`"/"`) is used in these
+    The default virtual host (``"/"``) is used in these
     examples, if you use a custom virtual host you have to add
-    the `-p` argument to the command, e.g:
-    `rabbitmqctl list_queues -p my_vhost ....`
+    the ``-p`` argument to the command, e.g:
+    ``rabbitmqctl list_queues -p my_vhost ....``
 
 .. _`rabbitmqctl(1)`: http://www.rabbitmq.com/man/rabbitmqctl.1.man.html
 
@@ -345,7 +355,7 @@ Here `messages_ready` is the number of messages ready
 for delivery (sent but not received), `messages_unacknowledged`
 is the number of messages that has been received by a worker but
 not acknowledged yet (meaning it is in progress, or has been reserved).
-`messages` is the sum of ready and unacknowledged messages combined.
+`messages` is the sum of ready and unacknowledged messages.
 
 
 Finding the number of workers currently consuming from a queue::
@@ -356,7 +366,7 @@ Finding the amount of memory allocated to a queue::
 
     $ rabbitmqctl list_queues name memory
 
-:Tip: Adding the `-q` option to `rabbitmqctl(1)`_ makes the output
+:Tip: Adding the ``-q`` option to `rabbitmqctl(1)`_ makes the output
       easier to parse.
 
 
@@ -365,10 +375,10 @@ Finding the amount of memory allocated to a queue::
 Munin
 =====
 
-This is a list of known Munin plugins that can be useful when
+This is a list of known Munin plug-ins that can be useful when
 maintaining a Celery cluster.
 
-* rabbitmq-munin: Munin-plugins for RabbitMQ.
+* rabbitmq-munin: Munin plug-ins for RabbitMQ.
 
     http://github.com/ask/rabbitmq-munin
 
@@ -408,11 +418,11 @@ still only periodically write it to disk.
 
 To take snapshots you need a Camera class, with this you can define
 what should happen every time the state is captured;  You can
-write it to a database, send it by e-mail or something else entirely.
+write it to a database, send it by email or something else entirely.
 
 :program:`celeryev` is then used to take snapshots with the camera,
 for example if you want to capture state every 2 seconds using the
-camera `myapp.Camera` you run :program:`celeryev` with the following
+camera ``myapp.Camera`` you run :program:`celeryev` with the following
 arguments::
 
     $ celeryev -c myapp.Camera --frequency=2.0
@@ -446,12 +456,12 @@ Here is an example camera, dumping the snapshot to screen:
 See the API reference for :mod:`celery.events.state` to read more
 about state objects.
 
-Now you can use this cam with `celeryev` by specifying
+Now you can use this cam with :program:`celeryev` by specifying
 it with the `-c` option::
 
     $ celeryev -c myapp.DumpCam --frequency=2.0
 
-Or you can use it programatically like this::
+Or you can use it programmatically like this::
 
     from celery.events import EventReceiver
     from celery.messaging import establish_connection
@@ -481,16 +491,16 @@ This list contains the events sent by the worker, and their arguments.
 Task Events
 ~~~~~~~~~~~
 
-* `task-received(uuid, name, args, kwargs, retries, eta, hostname,
-  timestamp)`
+* ``task-received(uuid, name, args, kwargs, retries, eta, hostname,
+  timestamp)``
 
     Sent when the worker receives a task.
 
-* `task-started(uuid, hostname, timestamp)`
+* ``task-started(uuid, hostname, timestamp, pid)``
 
     Sent just before the worker executes the task.
 
-* `task-succeeded(uuid, result, runtime, hostname, timestamp)`
+* ``task-succeeded(uuid, result, runtime, hostname, timestamp)``
 
     Sent if the task executed successfully.
 
@@ -498,16 +508,16 @@ Task Events
     (Starting from the task is sent to the worker pool, and ending when the
     pool result handler callback is called).
 
-* `task-failed(uuid, exception, traceback, hostname, timestamp)`
+* ``task-failed(uuid, exception, traceback, hostname, timestamp)``
 
     Sent if the execution of the task failed.
 
-* `task-revoked(uuid)`
+* ``task-revoked(uuid)``
 
     Sent if the task has been revoked (Note that this is likely
     to be sent by more than one worker).
 
-* `task-retried(uuid, exception, traceback, hostname, timestamp)`
+* ``task-retried(uuid, exception, traceback, hostname, timestamp)``
 
     Sent if the task failed, but will be retried in the future.
 
@@ -516,15 +526,19 @@ Task Events
 Worker Events
 ~~~~~~~~~~~~~
 
-* `worker-online(hostname, timestamp)`
+* ``worker-online(hostname, timestamp, sw_ident, sw_ver, sw_sys)``
 
     The worker has connected to the broker and is online.
 
-* `worker-heartbeat(hostname, timestamp)`
+    * `sw_ident`: Name of worker software (e.g. celeryd).
+    * `sw_ver`: Software version (e.g. 2.2.0).
+    * `sw_sys`: Operating System (e.g. Linux, Windows, Darwin).
+
+* ``worker-heartbeat(hostname, timestamp, sw_ident, sw_ver, sw_sys)``
 
     Sent every minute, if the worker has not sent a heartbeat in 2 minutes,
     it is considered to be offline.
 
-* `worker-offline(hostname, timestamp)`
+* ``worker-offline(hostname, timestamp, sw_ident, sw_ver, sw_sys)``
 
     The worker has disconnected from the broker.

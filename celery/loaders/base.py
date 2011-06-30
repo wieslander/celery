@@ -1,17 +1,31 @@
+from __future__ import absolute_import
+
 import importlib
+import os
 import re
+import warnings
 
-import anyjson
+from anyjson import deserialize
+from kombu.utils import cached_property
 
+from celery.datastructures import DictAttribute
+from celery.exceptions import ImproperlyConfigured
+from celery.utils import get_cls_by_name
 from celery.utils import import_from_cwd as _import_from_cwd
 
-BUILTIN_MODULES = ["celery.task"]
+BUILTIN_MODULES = frozenset(["celery.task"])
+
+ERROR_ENVVAR_NOT_SET = (
+"""The environment variable %r is not set,
+and as such the configuration could not be loaded.
+Please set this variable and make it point to
+a configuration module.""")
 
 
 class BaseLoader(object):
     """The base class for loaders.
 
-    Loaders handles to following things:
+    Loaders handles,
 
         * Reading celery client/worker configurations.
 
@@ -24,10 +38,13 @@ class BaseLoader(object):
         * What modules are imported to find tasks?
 
     """
-    _conf_cache = None
-    worker_initialized = False
-    override_backends = {}
+    builtin_modules = BUILTIN_MODULES
     configured = False
+    error_envvar_not_set = ERROR_ENVVAR_NOT_SET
+    override_backends = {}
+    worker_initialized = False
+
+    _conf = None
 
     def __init__(self, app=None, **kwargs):
         from celery.app import app_or_default
@@ -53,23 +70,46 @@ class BaseLoader(object):
         return importlib.import_module(module)
 
     def import_from_cwd(self, module, imp=None):
-        if imp is None:
-            imp = self.import_module
-        return _import_from_cwd(module, imp)
+        return _import_from_cwd(module,
+                self.import_module if imp is None else imp)
 
     def import_default_modules(self):
-        imports = self.conf.get("CELERY_IMPORTS") or []
-        imports = set(list(imports) + BUILTIN_MODULES)
-        return map(self.import_task_module, imports)
+        imports = set(list(self.conf.get("CELERY_IMPORTS") or ()))
+        return [self.import_task_module(module)
+                    for module in imports | self.builtin_modules]
 
     def init_worker(self):
         if not self.worker_initialized:
             self.worker_initialized = True
             self.on_worker_init()
 
+    def config_from_envvar(self, variable_name, silent=False):
+        module_name = os.environ.get(variable_name)
+        if not module_name:
+            if silent:
+                return False
+            raise ImproperlyConfigured(self.error_envvar_not_set % module_name)
+        return self.config_from_object(module_name, silent=silent)
+
+    def config_from_object(self, obj, silent=False):
+        if isinstance(obj, basestring):
+            try:
+                if "." in obj:
+                    obj = get_cls_by_name(obj, imp=self.import_from_cwd)
+                else:
+                    obj = self.import_from_cwd(obj)
+            except (ImportError, AttributeError):
+                if silent:
+                    return False
+                raise
+        if not hasattr(obj, "__getitem__"):
+            obj = DictAttribute(obj)
+        self._conf = obj
+        return True
+
     def cmdline_config_parser(self, args, namespace="celery",
                 re_type=re.compile(r"\((\w+)\)"),
-                extra_types={"json": anyjson.deserialize},
+                extra_types={"json": deserialize},
                 override_types={"tuple": "json",
                                 "list": "json",
                                 "dict": "json"}):
@@ -83,8 +123,8 @@ class BaseLoader(object):
 
             ## find key/value
             # ns.key=value|ns_key=value (case insensitive)
-            key, value = arg.replace('.', '_').split('=', 1)
-            key = key.upper()
+            key, value = arg.split('=', 1)
+            key = key.upper().replace(".", "_")
 
             ## find namespace.
             # .key=value|_key=value expands to default namespace.
@@ -113,18 +153,30 @@ class BaseLoader(object):
 
         return dict(map(getarg, args))
 
-    def mail_admins(self, subject, message, fail_silently=False,
+    def mail_admins(self, subject, body, fail_silently=False,
             sender=None, to=None, host=None, port=None,
-            user=None, password=None):
-        from celery.utils import mail
-        message = mail.Message(sender=sender, to=to,
-                               subject=subject, body=message)
-        mailer = mail.Mailer(host, port, user, password)
-        mailer.send(message, fail_silently=fail_silently)
+            user=None, password=None, timeout=None, use_ssl=False):
+        try:
+            message = self.mail.Message(sender=sender, to=to,
+                                        subject=subject, body=body)
+            mailer = self.mail.Mailer(host=host, port=port,
+                                      user=user, password=password,
+                                      timeout=timeout, use_ssl=use_ssl)
+            mailer.send(message)
+        except Exception, exc:
+            if not fail_silently:
+                raise
+            warnings.warn(self.mail.SendmailWarning(
+                "Mail could not be sent: %r %r" % (
+                    exc, {"To": to, "Subject": subject})))
 
     @property
     def conf(self):
         """Loader configuration."""
-        if not self._conf_cache:
-            self._conf_cache = self.read_configuration()
-        return self._conf_cache
+        if self._conf is None:
+            self._conf = self.read_configuration()
+        return self._conf
+
+    @cached_property
+    def mail(self):
+        return self.import_module("celery.utils.mail")

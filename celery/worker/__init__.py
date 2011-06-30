@@ -1,13 +1,17 @@
 import socket
 import logging
 import traceback
-from multiprocessing.util import Finalize
+
+from kombu.syn import blocking
+from kombu.utils.finalize import Finalize
 
 from celery import beat
+from celery import concurrency as _concurrency
 from celery import registry
 from celery import platforms
 from celery import signals
 from celery.app import app_or_default
+from celery.exceptions import SystemTerminate
 from celery.log import SilenceRepeated
 from celery.utils import noop, instantiate
 
@@ -22,7 +26,8 @@ TERMINATE = 0x3
 WORKER_SIGRESET = frozenset(["SIGTERM",
                              "SIGHUP",
                              "SIGTTIN",
-                             "SIGTTOU"])
+                             "SIGTTOU",
+                             "SIGUSR1"])
 
 #: List of signals to ignore when a child process starts.
 WORKER_SIGIGNORE = frozenset(["SIGINT"])
@@ -35,11 +40,12 @@ def process_initializer(app, hostname):
 
     """
     app = app_or_default(app)
-    [platforms.reset_signal(signal) for signal in WORKER_SIGRESET]
-    [platforms.ignore_signal(signal) for signal in WORKER_SIGIGNORE]
+    app.set_current()
+    platforms.signals.reset(*WORKER_SIGRESET)
+    platforms.signals.ignore(*WORKER_SIGIGNORE)
     platforms.set_mp_process_title("celeryd", hostname=hostname)
 
-    # This is for windows and other platforms not supporting
+    # This is for Windows and other platforms not supporting
     # fork(). Note that init_worker makes sure it's only
     # run once per process.
     app.loader.init_worker()
@@ -49,6 +55,9 @@ def process_initializer(app, hostname):
 
 class WorkController(object):
     """Unmanaged worker instance."""
+    RUN = RUN
+    CLOSE = CLOSE
+    TERMINATE = TERMINATE
 
     #: The number of simultaneous processes doing work (default:
     #: :setting:`CELERYD_CONCURRENCY`)
@@ -79,10 +88,7 @@ class WorkController(object):
     #: processing.
     ready_queue = None
 
-    #: Instance of :class:`celery.worker.controllers.ScheduleController`.
-    schedule_controller = None
-
-    #: Instance of :class:`celery.worker.controllers.Mediator`.
+    #: Instance of :class:`celery.worker.mediator.Mediator`.
     mediator = None
 
     #: Consumer instance.
@@ -98,9 +104,9 @@ class WorkController(object):
             schedule_filename=None, task_time_limit=None,
             task_soft_time_limit=None, max_tasks_per_child=None,
             pool_putlocks=None, db=None, prefetch_multiplier=None,
-            eta_scheduler_precision=None, queues=None,
-            disable_rate_limits=None, autoscale=None,
-            autoscaler_cls=None, scheduler_cls=None, app=None):
+            eta_scheduler_precision=None, disable_rate_limits=None,
+            autoscale=None, autoscaler_cls=None, scheduler_cls=None,
+            app=None):
 
         self.app = app_or_default(app)
         conf = self.app.conf
@@ -113,11 +119,13 @@ class WorkController(object):
         if send_events is None:
             send_events = conf.CELERY_SEND_EVENTS
         self.send_events = send_events
-        self.pool_cls = pool_cls or conf.CELERYD_POOL
+        self.pool_cls = _concurrency.get_implementation(
+                            pool_cls or conf.CELERYD_POOL)
         self.consumer_cls = consumer_cls or conf.CELERYD_CONSUMER
         self.mediator_cls = mediator_cls or conf.CELERYD_MEDIATOR
         self.eta_scheduler_cls = eta_scheduler_cls or \
                                     conf.CELERYD_ETA_SCHEDULER
+
         self.autoscaler_cls = autoscaler_cls or \
                                     conf.CELERYD_AUTOSCALER
         self.schedule_filename = schedule_filename or \
@@ -143,16 +151,16 @@ class WorkController(object):
         self.db = db or conf.CELERYD_STATE_DB
         self.disable_rate_limits = disable_rate_limits or \
                                 conf.CELERY_DISABLE_RATE_LIMITS
-        self.queues = queues
-
         self._finalize = Finalize(self, self.stop, exitpriority=1)
+        self._finalize_db = None
 
         if self.db:
             persistence = state.Persistent(self.db)
-            Finalize(persistence, persistence.save, exitpriority=5)
+            self._finalize_db = Finalize(persistence, persistence.save,
+                                         exitpriority=5)
 
         # Queues
-        if disable_rate_limits:
+        if self.disable_rate_limits:
             self.ready_queue = FastQueue()
             self.ready_queue.put = self.process_task
         else:
@@ -175,6 +183,12 @@ class WorkController(object):
                                 timeout=self.task_time_limit,
                                 soft_timeout=self.task_soft_time_limit,
                                 putlocks=self.pool_putlocks)
+        self.priority_timer = instantiate(self.pool.Timer)
+
+        if not self.eta_scheduler_cls:
+            # Default Timer is set by the pool, as e.g. eventlet
+            # needs a custom implementation.
+            self.eta_scheduler_cls = self.pool.Timer
 
         if autoscale:
             self.autoscaler = instantiate(self.autoscaler_cls, self.pool,
@@ -183,15 +197,16 @@ class WorkController(object):
                                           logger=self.logger)
 
         self.mediator = None
-        if not disable_rate_limits:
+        if not self.disable_rate_limits:
             self.mediator = instantiate(self.mediator_cls, self.ready_queue,
                                         app=self.app,
                                         callback=self.process_task,
                                         logger=self.logger)
+
         self.scheduler = instantiate(self.eta_scheduler_cls,
-                                     precision=eta_scheduler_precision,
-                                     on_error=self.on_timer_error,
-                                     on_tick=self.on_timer_tick)
+                                precision=eta_scheduler_precision,
+                                on_error=self.on_timer_error,
+                                on_tick=self.on_timer_tick)
 
         self.beat = None
         if self.embed_clockservice:
@@ -210,7 +225,7 @@ class WorkController(object):
                                     init_callback=self.ready_callback,
                                     initial_prefetch_count=prefetch_count,
                                     pool=self.pool,
-                                    queues=self.queues,
+                                    priority_timer=self.priority_timer,
                                     app=self.app)
 
         # The order is important here;
@@ -225,42 +240,55 @@ class WorkController(object):
 
     def start(self):
         """Starts the workers main loop."""
-        self._state = RUN
+        self._state = self.RUN
 
-        for i, component in enumerate(self.components):
-            self.logger.debug("Starting thread %s..." % (
-                                    component.__class__.__name__))
-            self._running = i + 1
-            component.start()
+        try:
+            for i, component in enumerate(self.components):
+                self.logger.debug("Starting thread %s..." % (
+                                        component.__class__.__name__))
+                self._running = i + 1
+                blocking(component.start)
+        except SystemTerminate:
+            self.terminate()
+            raise
+        except:
+            self.stop()
+            raise
 
-    def process_task(self, wrapper):
+    def process_task(self, request):
         """Process task by sending it to the pool of workers."""
         try:
-            try:
-                wrapper.task.execute(wrapper, self.pool,
-                    self.loglevel, self.logfile)
-            except Exception, exc:
-                self.logger.critical("Internal error %s: %s\n%s" % (
-                                exc.__class__, exc, traceback.format_exc()))
-        except (SystemExit, KeyboardInterrupt):
+            request.task.execute(request, self.pool,
+                                 self.loglevel, self.logfile)
+        except Exception, exc:
+            self.logger.critical("Internal error %s: %s\n%s" % (
+                            exc.__class__, exc, traceback.format_exc()))
+        except SystemTerminate:
+            self.terminate()
+            raise SystemExit()
+        except BaseException, exc:
             self.stop()
+            raise exc
 
-    def stop(self):
+    def stop(self, in_sighandler=False):
         """Graceful shutdown of the worker server."""
-        self._shutdown(warm=True)
+        if not in_sighandler or self.pool.signal_safe:
+            blocking(self._shutdown, warm=True)
 
-    def terminate(self):
+    def terminate(self, in_sighandler=False):
         """Not so graceful shutdown of the worker server."""
-        self._shutdown(warm=False)
+        if not in_sighandler or self.pool.signal_safe:
+            blocking(self._shutdown, warm=False)
 
     def _shutdown(self, warm=True):
         what = (warm and "stopping" or "terminating").capitalize()
 
-        if self._state != RUN or self._running != len(self.components):
+        if self._state != self.RUN or self._running != len(self.components):
             # Not fully started, can safely exit.
+            self._state = self.TERMINATE
             return
 
-        self._state = CLOSE
+        self._state = self.CLOSE
         signals.worker_shutdown.send(sender=self)
 
         for component in reversed(self.components):
@@ -268,11 +296,12 @@ class WorkController(object):
                     what, component.__class__.__name__))
             stop = component.stop
             if not warm:
-                stop = getattr(component, "terminate", stop)
+                stop = getattr(component, "terminate", None) or stop
             stop()
 
+        self.priority_timer.stop()
         self.consumer.close_connection()
-        self._state = TERMINATE
+        self._state = self.TERMINATE
 
     def on_timer_error(self, exc_info):
         _, exc, _ = exc_info

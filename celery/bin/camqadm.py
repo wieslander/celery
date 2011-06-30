@@ -12,7 +12,6 @@ import pprint
 from itertools import count
 
 from amqplib import client_0_8 as amqp
-from kombu.utils import partition
 
 from celery.app import app_or_default
 from celery.bin.base import Command
@@ -75,7 +74,8 @@ class Spec(object):
             False
 
         """
-        arg_name, arg_type = self.args[index]
+        arg_info = self.args[index]
+        arg_type = arg_info[1]
         # Might be a custom way to coerce the string value,
         # so look in the coercion map.
         return COERCE.get(arg_type, arg_type)(value)
@@ -256,7 +256,7 @@ class AMQShell(cmd.Cmd):
         if first:
             return first
         return [cmd for cmd in names
-                    if partition(cmd, ".")[2].startswith(text)]
+                    if cmd.partition(".")[2].startswith(text)]
 
     def dispatch(self, cmd, argline):
         """Dispatch and execute the command.
@@ -318,7 +318,7 @@ class AMQShell(cmd.Cmd):
     def _reconnect(self):
         """Re-establish connection to the AMQP server."""
         self.conn = self.connect(self.conn)
-        self.chan = self.conn.create_backend().channel
+        self.chan = self.conn.channel()
         self.needs_reconnect = False
 
     @property
@@ -339,9 +339,8 @@ class AMQPAdmin(object):
     def connect(self, conn=None):
         if conn:
             conn.close()
-        self.say("-> connecting to %s." % (
-                    self.app.amqp.format_broker_info(), ))
         conn = self.app.broker_connection()
+        self.say("-> connecting to %s." % conn.as_uri())
         conn.connect()
         self.say("-> connected.")
         return conn
@@ -350,7 +349,11 @@ class AMQPAdmin(object):
         shell = AMQShell(connect=self.connect)
         if self.args:
             return shell.onecmd(" ".join(self.args))
-        return shell.cmdloop()
+        try:
+            return shell.cmdloop()
+        except KeyboardInterrupt:
+            self.say("(bibi)")
+            pass
 
     def say(self, m):
         if not self.silent:

@@ -1,59 +1,29 @@
+from __future__ import absolute_import, with_statement
+
 import os
 import sys
 
-from optparse import OptionParser, BadOptionError, make_option as Option
+from optparse import OptionParser, BadOptionError
 
 from celery import __version__
-from celery.platforms import create_daemon_context
+from celery.platforms import detached
+from celery.bin.base import daemon_options
 
-OPTION_LIST = (
-        Option('-f', '--logfile', default=None,
-               action="store", dest="logfile",
-               help="Path to the logfile"),
-        Option('--pidfile', default="celeryd.pid",
-               action="store", dest="pidfile",
-               help="Path to the pidfile."),
-        Option('--uid', default=None,
-               action="store", dest="uid",
-               help="Effective user id to run as when detached."),
-        Option('--gid', default=None,
-               action="store", dest="gid",
-               help="Effective group id to run as when detached."),
-        Option('--umask', default=0,
-               action="store", type="int", dest="umask",
-               help="Umask of the process when detached."),
-        Option('--workdir', default=None,
-               action="store", dest="working_directory",
-               help="Directory to change to when detached."),
-)
+OPTION_LIST = daemon_options(default_pidfile="celeryd.pid")
 
 
-class detached(object):
-
-    def __init__(self, path, argv, logfile=None, pidfile=None, uid=None,
-            gid=None, umask=0, working_directory=None):
-        self.path = path
-        self.argv = argv
-        self.logfile = logfile
-        self.pidfile = pidfile
-        self.uid = uid
-        self.gid = gid
-        self.umask = umask
-        self.working_directory = working_directory
-
-    def start(self):
-        context, on_stop = create_daemon_context(
-                                logfile=self.logfile,
-                                pidfile=self.pidfile,
-                                uid=self.uid,
-                                gid=self.gid,
-                                umask=self.umask,
-                                working_directory=self.working_directory)
-        context.open()
+def detach(path, argv, logfile=None, pidfile=None, uid=None,
+           gid=None, umask=0, working_directory=None):
+    with detached(logfile, pidfile, uid, gid, umask, working_directory):
         try:
-            os.execv(self.path, [self.path] + self.argv)
-        finally:
-            on_stop()
+            os.execv(path, [path] + argv)
+        except Exception:
+            import logging
+            from celery.log import setup_logger
+            logger = setup_logger(logfile=logfile, loglevel=logging.ERROR)
+            logger.critical("Can't exec %r" % (
+                    " ".join([path] + argv), ),
+                    exc_info=sys.exc_info())
 
 
 class PartialOptionParser(OptionParser):
@@ -143,9 +113,9 @@ class detached_celeryd(object):
             argv = sys.argv
         prog_name = os.path.basename(argv[0])
         options, values, leftovers = self.parse_options(prog_name, argv[1:])
-        detached(path=self.execv_path,
-                 argv=self.execv_argv + leftovers,
-                 **vars(options)).start()
+        detach(path=self.execv_path,
+               argv=self.execv_argv + leftovers,
+               **vars(options))
 
 
 def main():

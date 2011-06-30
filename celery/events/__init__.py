@@ -1,8 +1,11 @@
+from __future__ import absolute_import, with_statement
+
 import time
 import socket
 import threading
 
 from collections import deque
+from contextlib import contextmanager
 from itertools import count
 
 from kombu.entity import Exchange, Queue
@@ -14,20 +17,16 @@ from celery.utils import gen_unique_id
 event_exchange = Exchange("celeryev", type="topic")
 
 
-
-def create_event(type, fields):
-    return dict(fields,
-                type=type,
-                timestamp=fields.get("timestamp") or time.time())
-
-
-def Event(type, **fields):
+def Event(type, _fields=None, **fields):
     """Create an event.
 
-    An event is a dictionary, the only required field is the type.
+    An event is a dictionary, the only required field is ``type``.
 
     """
-    return create_event(type, fields)
+    event = dict(_fields or {}, type=type, **fields)
+    if "timestamp" not in event:
+        event["timestamp"] = time.time()
+    return event
 
 
 class EventDispatcher(object):
@@ -43,36 +42,51 @@ class EventDispatcher(object):
                       ignore send requests to domains not in this list.
                       If this is :const:`None`, all events will be sent.
 
+    :keyword channel: Can be used instead of `connection` to specify
+        an exact channel to use when sending events.
+
+    :keyword buffer_while_offline: If enabled events will be buffered
+       while the connection is down. :meth:`flush` must be called
+       as soon as the connection is re-established.
+
     You need to :meth:`close` this after use.
 
     """
 
-    def __init__(self, connection, hostname=None, enabled=True,
-            domains=None, app=None):
+    def __init__(self, connection=None, hostname=None, enabled=True,
+            channel=None, buffer_while_offline=True, app=None,
+            serializer=None, domains=None):
         self.app = app_or_default(app)
         self.connection = connection
+        self.channel = channel
         self.hostname = hostname or socket.gethostname()
-        self.enabled = enabled
-        self._lock = threading.Lock()
+        self.buffer_while_offline = buffer_while_offline
+        self.mutex = threading.Lock()
         self.publisher = None
         self._outbound_buffer = deque()
         self.domains = set(domains)
+        self.serializer = serializer or self.app.conf.CELERY_EVENT_SERIALIZER
 
+        self.enabled = enabled
         if self.enabled:
             self.enable()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
     def enable(self):
-        conf = self.app.conf
+        self.publisher = Producer(self.channel or self.connection.channel(),
+                                  exchange=event_exchange,
+                                  serializer=self.serializer)
         self.enabled = True
-        self.publisher = Producer(self.connection.channel(),
-                                 exchange=event_exchange,
-                                 serializer=conf.CELERY_EVENT_SERIALIZER)
 
     def disable(self):
-        self.enabled = False
-        if self.publisher is not None:
-            self.publisher.channel.close()
-            self.publisher = None
+        if self.enabled:
+            self.enabled = False
+            self.close()
 
     def send(self, type, **fields):
         """Send event.
@@ -81,36 +95,43 @@ class EventDispatcher(object):
         :keyword \*\*fields: Event arguments.
 
         """
-        if not self.enabled:
-            return
+        if self.enabled:
 
-        domain, subtype = type.split("-", 1)
-        if self.domains is not None and domain not in self.domains:
-            return
+            domain, subtype = type.split("-", 1)
+            if self.domains is not None and domain not in self.domains:
+                return
 
-        self._lock.acquire()
-        event = Event(type,
-                      hostname=self.hostname,
-                      clock=self.app.clock.forward(),
-                      **fields)
-        routing_key = "%s.%s" % (domain, subtype)
-        try:
-            try:
-                self.publisher.publish(event, routing_key=routing_key)
-            except Exception, exc:
-                self._outbound_buffer.append((event, exc))
-        finally:
-            self._lock.release()
+            with self.mutex:
+                fields.setdefault("hostname", self.hostname)
+                if "clock" not in fields:
+                    fields["clock"] = self.app.clock.forward()
+                event = Event(type, **fields)
+                routing_key = "%s.%s" % (domain, subtype)
+                try:
+                    self.publisher.publish(event, routing_key=routing_key)
+                except Exception, exc:
+                    if not self.buffer_while_offline:
+                        raise
+                    self._outbound_buffer.append((type, fields, exc))
 
     def flush(self):
         while self._outbound_buffer:
-            event, _ = self._outbound_buffer.popleft()
-            self.publisher.send(event)
+            try:
+                type, fields, _ = self._outbound_buffer.popleft()
+            except IndexError:
+                return
+            self.send(type, **fields)
+
+    def copy_buffer(self, other):
+        self._outbound_buffer = other._outbound_buffer
 
     def close(self):
         """Close the event dispatcher."""
-        self._lock.locked() and self._lock.release()
-        self.publisher and self.publisher.channel.close()
+        self.mutex.locked() and self.mutex.release()
+        if self.publisher is not None:
+            if not self.channel:  # close auto channel.
+                self.publisher.channel.close()
+            self.publisher = None
 
 
 class EventReceiver(object):
@@ -126,13 +147,14 @@ class EventReceiver(object):
     """
     handlers = {}
 
-    def __init__(self, connection, handlers=None, routing_key="#", app=None):
+    def __init__(self, connection, handlers=None, routing_key="#",
+            node_id=None, app=None):
         self.app = app_or_default(app)
         self.connection = connection
         if handlers is not None:
             self.handlers = handlers
         self.routing_key = routing_key
-        self.node_id = gen_unique_id()
+        self.node_id = node_id or gen_unique_id()
         self.queue = Queue("%s.%s" % ("celeryev", self.node_id),
                            exchange=event_exchange,
                            routing_key=self.routing_key,
@@ -145,6 +167,7 @@ class EventReceiver(object):
         handler = self.handlers.get(type) or self.handlers.get("*")
         handler and handler(event)
 
+    @contextmanager
     def consumer(self):
         """Create event consumer.
 
@@ -154,40 +177,85 @@ class EventReceiver(object):
             by calling `consumer.channel.close()`.
 
         """
-        conf = self.app.conf
         consumer = Consumer(self.connection.channel(),
-                            queues=[self.queue],
-                            no_ack=True)
+                            queues=[self.queue], no_ack=True)
         consumer.register_callback(self._receive)
-        return consumer
+        with consumer:
+            yield consumer
+        consumer.channel.close()
 
-    def capture(self, limit=None, timeout=None):
+    def itercapture(self, limit=None, timeout=None, wakeup=True):
+        with self.consumer() as consumer:
+            if wakeup:
+                self.wakeup_workers(channel=consumer.channel)
+
+            yield consumer
+
+            self.drain_events(limit=limit, timeout=timeout)
+
+    def capture(self, limit=None, timeout=None, wakeup=True):
         """Open up a consumer capturing events.
 
         This has to run in the main process, and it will never
         stop unless forced via :exc:`KeyboardInterrupt` or :exc:`SystemExit`.
 
         """
-        consumer = self.consumer()
-        consumer.consume()
-        try:
-            for iteration in count(0):
-                if limit and iteration > limit:
-                    break
-                try:
-                    self.connection.drain_events(timeout=timeout)
-                except socket.timeout:
-                    if timeout:
-                        raise
-                except socket.error:
-                    pass
-        finally:
-            consumer.cancel()
-            consumer.channel.close()
+        list(self.itercapture(limit=limit, timeout=timeout, wakeup=wakeup))
 
-    def _receive(self, message_data, message):
-        type = message_data.pop("type").lower()
-        clock = message_data.get("clock")
+    def wakeup_workers(self, channel=None):
+        self.app.control.broadcast("heartbeat",
+                                   connection=self.connection,
+                                   channel=channel)
+
+    def drain_events(self, limit=None, timeout=None):
+        for iteration in count(0):
+            if limit and iteration >= limit:
+                break
+            try:
+                self.connection.drain_events(timeout=timeout)
+            except socket.timeout:
+                if timeout:
+                    raise
+            except socket.error:
+                pass
+
+    def _receive(self, body, message):
+        type = body.pop("type").lower()
+        clock = body.get("clock")
         if clock:
             self.app.clock.adjust(clock)
-        self.process(type, create_event(type, message_data))
+        self.process(type, Event(type, body))
+
+
+class Events(object):
+
+    def __init__(self, app=None):
+        self.app = app
+
+    def Receiver(self, connection, handlers=None, routing_key="#",
+            node_id=None):
+        return EventReceiver(connection,
+                             handlers=handlers,
+                             routing_key=routing_key,
+                             node_id=node_id,
+                             app=self.app)
+
+    def Dispatcher(self, connection=None, hostname=None, enabled=True,
+            channel=None, buffer_while_offline=True):
+        return EventDispatcher(connection,
+                               hostname=hostname,
+                               enabled=enabled,
+                               channel=channel,
+                               app=self.app)
+
+    def State(self):
+        from celery.events.state import State as _State
+        return _State()
+
+    @contextmanager
+    def default_dispatcher(self, hostname=None, enabled=True,
+            buffer_while_offline=False):
+        with self.app.amqp.publisher_pool.acquire(block=True) as pub:
+            with self.Dispatcher(pub.connection, hostname, enabled,
+                                 pub.channel, buffer_while_offline) as d:
+                yield d

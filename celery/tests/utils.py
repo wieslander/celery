@@ -1,71 +1,100 @@
-from __future__ import generators
+from __future__ import absolute_import
 
+try:
+    import unittest
+    unittest.skip
+except AttributeError:
+    import unittest2 as unittest
+
+import importlib
+import logging
 import os
 import sys
-import __builtin__
-from StringIO import StringIO
+import time
+try:
+    import __builtin__ as builtins
+except ImportError:  # py3k
+    import builtins  # noqa
 
+from functools import wraps
+from contextlib import contextmanager
+
+
+import mock
 from nose import SkipTest
 
 from celery.app import app_or_default
-from celery.utils.functional import wraps
-
-
-class GeneratorContextManager(object):
-    def __init__(self, gen):
-        self.gen = gen
-
-    def __enter__(self):
-        try:
-            return self.gen.next()
-        except StopIteration:
-            raise RuntimeError("generator didn't yield")
-
-    def __exit__(self, type, value, traceback):
-        if type is None:
-            try:
-                self.gen.next()
-            except StopIteration:
-                return
-            else:
-                raise RuntimeError("generator didn't stop")
-        else:
-            try:
-                self.gen.throw(type, value, traceback)
-                raise RuntimeError("generator didn't stop after throw()")
-            except StopIteration:
-                return True
-            except AttributeError:
-                raise value
-            except:
-                if sys.exc_info()[1] is not value:
-                    raise
-
-
-def fallback_contextmanager(fun):
-    def helper(*args, **kwds):
-        return GeneratorContextManager(fun(*args, **kwds))
-    return helper
-
-
-def execute_context(context, fun):
-    val = context.__enter__()
-    exc_info = (None, None, None)
-    retval = None
-    try:
-        retval = fun(val)
-    except:
-        exc_info = sys.exc_info()
-    context.__exit__(*exc_info)
-    return retval
-
-
-try:
-    from contextlib import contextmanager
-except ImportError:
-    contextmanager = fallback_contextmanager
-
 from celery.utils import noop
+from celery.utils.compat import StringIO, LoggerAdapter
+
+
+class Mock(mock.Mock):
+
+    def __init__(self, *args, **kwargs):
+        attrs = kwargs.pop("attrs", None) or {}
+        super(Mock, self).__init__(*args, **kwargs)
+        for attr_name, attr_value in attrs.items():
+            setattr(self, attr_name, attr_value)
+
+
+def skip_unless_module(module):
+
+    def _inner(fun):
+
+        @wraps(fun)
+        def __inner(*args, **kwargs):
+            try:
+                importlib.import_module(module)
+            except ImportError:
+                raise SkipTest("Does not have %s" % (module, ))
+
+            return fun(*args, **kwargs)
+
+        return __inner
+    return _inner
+
+
+
+class AppCase(unittest.TestCase):
+
+    def setUp(self):
+        from celery.app import current_app
+        self.app = self._current_app = current_app()
+        self.setup()
+
+    def tearDown(self):
+        self.teardown()
+        self._current_app.set_current()
+
+    def setup(self):
+        pass
+
+    def teardown(self):
+        pass
+
+
+def get_handlers(logger):
+    if isinstance(logger, LoggerAdapter):
+        return logger.logger.handlers
+    return logger.handlers
+
+
+def set_handlers(logger, new_handlers):
+    if isinstance(logger, LoggerAdapter):
+        logger.logger.handlers = new_handlers
+    logger.handlers = new_handlers
+
+
+@contextmanager
+def wrap_logger(logger, loglevel=logging.ERROR):
+    old_handlers = get_handlers(logger)
+    sio = StringIO()
+    siohandler = logging.StreamHandler(sio)
+    set_handlers(logger, [siohandler])
+
+    yield sio
+
+    set_handlers(logger, old_handlers)
 
 
 @contextmanager
@@ -111,17 +140,20 @@ def with_environ(env_name, env_value):
     return _envpatched
 
 
-def sleepdeprived(fun):
+def sleepdeprived(module=time):
 
-    @wraps(fun)
-    def _sleepdeprived(*args, **kwargs):
-        import time
-        old_sleep = time.sleep
-        time.sleep = noop
-        try:
-            return fun(*args, **kwargs)
-        finally:
-            time.sleep = old_sleep
+    def _sleepdeprived(fun):
+
+        @wraps(fun)
+        def __sleepdeprived(*args, **kwargs):
+            old_sleep = module.sleep
+            module.sleep = noop
+            try:
+                return fun(*args, **kwargs)
+            finally:
+                module.sleep = old_sleep
+
+        return __sleepdeprived
 
     return _sleepdeprived
 
@@ -203,7 +235,7 @@ def mask_modules(*modnames):
 
     """
 
-    realimport = __builtin__.__import__
+    realimport = builtins.__import__
 
     def myimp(name, *args, **kwargs):
         if name in modnames:
@@ -211,9 +243,9 @@ def mask_modules(*modnames):
         else:
             return realimport(name, *args, **kwargs)
 
-    __builtin__.__import__ = myimp
+    builtins.__import__ = myimp
     yield True
-    __builtin__.__import__ = realimport
+    builtins.__import__ = realimport
 
 
 @contextmanager
@@ -228,3 +260,80 @@ def override_stdouts():
 
     sys.stdout = sys.__stdout__ = prev_out
     sys.stderr = sys.__stderr__ = prev_err
+
+
+def patch(module, name, mocked):
+    module = importlib.import_module(module)
+
+    def _patch(fun):
+
+        @wraps(fun)
+        def __patched(*args, **kwargs):
+            prev = getattr(module, name)
+            setattr(module, name, mocked)
+            try:
+                return fun(*args, **kwargs)
+            finally:
+                setattr(module, name, prev)
+        return __patched
+    return _patch
+
+
+@contextmanager
+def platform_pyimp(replace=None):
+    import platform
+    prev = getattr(platform, "python_implementation", None)
+    if replace:
+        platform.python_implementation = replace
+    else:
+        try:
+            delattr(platform, "python_implementation")
+        except AttributeError:
+            pass
+    yield
+    if prev is not None:
+        platform.python_implementation = prev
+
+
+@contextmanager
+def sys_platform(value):
+    prev, sys.platform = sys.platform, value
+    yield
+    sys.platform = prev
+
+
+@contextmanager
+def pypy_version(value=None):
+    prev = getattr(sys, "pypy_version_info", None)
+    if value:
+        sys.pypy_version_info = value
+    else:
+        try:
+            delattr(sys, "pypy_version_info")
+        except AttributeError:
+            pass
+    yield
+    if prev is not None:
+        sys.pypy_version_info = prev
+
+
+@contextmanager
+def reset_modules(*modules):
+    prev = dict((k, sys.modules.pop(k)) for k in modules if k in sys.modules)
+    yield
+    sys.modules.update(prev)
+
+
+@contextmanager
+def patch_modules(*modules):
+    from types import ModuleType
+
+    prev = {}
+    for mod in modules:
+        prev[mod], sys.modules[mod] = sys.modules[mod], ModuleType(mod)
+    yield
+    for name, mod in prev.iteritems():
+        if mod is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = mod

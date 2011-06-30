@@ -24,11 +24,29 @@ Configuration
 Configuration is easy, set the transport, and configure the location of
 your Redis database::
 
-    BROKER_BACKEND = "redis"
+    BROKER_TRANSPORT = "redis"
 
     BROKER_HOST = "localhost"  # Maps to redis host.
     BROKER_PORT = 6379         # Maps to redis port.
     BROKER_VHOST = "0"         # Maps to database number.
+
+
+Results
+~~~~~~~
+
+You probably also want to store results in Redis::
+
+    CELERY_RESULT_BACKEND = "redis"
+    CELERY_REDIS_HOST = "localhost"
+    CELERY_REDIS_PORT = 6379
+    CELERY_REDIS_DB = 0
+
+For a complete list of options supported by the Redis result backend see
+:ref:`conf-redis-result-backend`
+
+If you don't intend to consume results you should disable them::
+
+    CELERY_IGNORE_RESULT = True
 
 .. _otherqueues-sqlalchemy:
 
@@ -50,11 +68,11 @@ an SQLAlchemy database URI.
 
 #. Set your broker transport::
 
-    BROKER_BACKEND = "sqlakombu.transport.Transport"
+    BROKER_TRANSPORT = "sqlakombu.transport.Transport"
 
 #. Configure the database URI::
 
-    BROKER_HOST = "sqlite://celerydb.sqlite"
+    BROKER_HOST = "sqlite:///celerydb.sqlite"
 
 Please see `SQLAlchemy: Supported Databases`_ for a table of supported databases.
 Some other `SQLAlchemy Connection String`_, examples:
@@ -74,10 +92,20 @@ Some other `SQLAlchemy Connection String`_, examples:
     BROKER_HOST = "oracle://scott:tiger@127.0.0.1:1521/sidname"
 
 .. _`SQLAlchemy: Supported Databases`:
-    http://www.sqlalchemy.org/docs/dbengine.html#supported-databases
+    http://www.sqlalchemy.org/docs/core/engines.html#supported-databases
 
 .. _`SQLAlchemy Connection String`:
-    http://www.sqlalchemy.org/docs/dbengine.html#create-engine-url-arguments
+    http://www.sqlalchemy.org/docs/core/engines.html#database-urls
+
+Results
+~~~~~~~
+
+To store results in the database as well, you should configure the result
+backend.  See :ref:`conf-database-result-backend`.
+
+If you don't intend to consume results you should disable them::
+
+    CELERY_IGNORE_RESULT = True
 
 .. _otherqueues-django:
 
@@ -99,7 +127,7 @@ configuration values.
 
 #. Set your broker transport::
 
-    BROKER_BACKEND = "djkombu.transport.DatabaseTransport"
+    BROKER_TRANSPORT = "djkombu.transport.DatabaseTransport"
 
 #. Add :mod:`djkombu` to `INSTALLED_APPS`::
 

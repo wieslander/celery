@@ -13,7 +13,7 @@
 Basics
 ======
 
-Executing tasks is done with :meth:`~celery.task.Base.Task.apply_async`,
+Executing a task is done with :meth:`~celery.task.Base.Task.apply_async`,
 and the shortcut: :meth:`~celery.task.Base.Task.delay`.
 
 `delay` is simple and convenient, as it looks like calling a regular
@@ -36,8 +36,8 @@ available as attributes on the `Task` class (see :ref:`task-options`).
 In addition you can set countdown/eta, task expiry, provide a custom broker
 connection and more.
 
-Let's go over these in more detail.  All the examples uses a simple task,
-called `add`, taking two positional arguments and returning the sum:
+Let's go over these in more detail.  All the examples uses a simple task
+called `add`, returning the sum of two positional arguments:
 
 .. code-block:: python
 
@@ -75,8 +75,8 @@ The task is guaranteed to be executed at some time *after* the
 specified date and time, but not necessarily at that exact time.
 Possible reasons for broken deadlines may include many items waiting
 in the queue, or heavy network latency.  To make sure your tasks
-are executed in a timely manner you should monitor queue lenghts. Use
-Munin, or similar tools, to receive alerts, so appropiate action can be
+are executed in a timely manner you should monitor queue lengths. Use
+Munin, or similar tools, to receive alerts, so appropriate action can be
 taken to ease the workload.  See :ref:`monitoring-munin`.
 
 While `countdown` is an integer, `eta` must be a :class:`~datetime.datetime`
@@ -97,7 +97,7 @@ Expiration
 
 The `expires` argument defines an optional expiry time,
 either as seconds after task publish, or a specific date and time using
-:class:~datetime.datetime`:
+:class:`~datetime.datetime`:
 
 .. code-block:: python
 
@@ -135,10 +135,10 @@ json -- JSON is supported in many programming languages, is now
     using the modern Python libraries such as :mod:`cjson` or :mod:`simplejson`.
 
     The primary disadvantage to JSON is that it limits you to the following
-    data types: strings, unicode, floats, boolean, dictionaries, and lists.
+    data types: strings, Unicode, floats, boolean, dictionaries, and lists.
     Decimals and dates are notably missing.
 
-    Also, binary data will be transferred using base64 encoding, which will
+    Also, binary data will be transferred using Base64 encoding, which will
     cause the transferred data to be around 34% larger than an encoding which
     supports native binary types.
 
@@ -186,7 +186,7 @@ to use when sending a task:
     3. The default :setting:`CELERY_TASK_SERIALIZER` setting.
 
 
-*Using the `serializer` argument to `apply_async`*:
+* Using the `serializer` argument to `apply_async`:
 
 .. code-block:: python
 
@@ -224,7 +224,7 @@ publisher:
 
 .. note::
 
-    This particularly example is better expressed as a task set.
+    This particular example is better expressed as a task set.
     See :ref:`sets-taskset`.  Tasksets already reuses connections.
 
 

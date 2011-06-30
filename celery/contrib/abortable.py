@@ -29,7 +29,7 @@ In the consumer:
 
    from celery.contrib.abortable import AbortableTask
 
-   def MyLongRunningTask(AbortableTask):
+   class MyLongRunningTask(AbortableTask):
 
        def run(self, **kwargs):
            logger = self.get_logger(**kwargs)
@@ -155,7 +155,8 @@ class AbortableTask(Task):
         often (for performance).
 
         """
-        result = self.AsyncResult(kwargs["task_id"])
+        task_id = kwargs.get('task_id', self.request.id)
+        result = self.AsyncResult(task_id)
         if not isinstance(result, AbortableAsyncResult):
             return False
         return result.is_aborted()

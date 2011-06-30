@@ -1,12 +1,16 @@
 import urllib2
+
 from urllib import urlencode
 from urlparse import urlparse
+try:
+    from urlparse import parse_qsl
+except ImportError:  # pragma: no cover
+    from cgi import parse_qsl  # noqa
 
 from anyjson import deserialize
 
 from celery import __version__ as celery_version
 from celery.task.base import Task as BaseTask
-from celery.utils.compat import parse_qsl
 
 GET_METHODS = frozenset(["GET", "HEAD"])
 
@@ -24,7 +28,7 @@ class UnknownStatusError(InvalidResponseError):
 
 
 def maybe_utf8(value):
-    """Encode utf-8 value, only if the value is actually utf-8."""
+    """Encode to utf-8, only if the value is Unicode."""
     if isinstance(value, unicode):
         return value.encode("utf-8")
     return value
@@ -77,7 +81,7 @@ class MutableURL(object):
     """
     def __init__(self, url):
         self.parts = urlparse(url)
-        self._query = dict(parse_qsl(self.parts[4]))
+        self.query = dict(parse_qsl(self.parts[4]))
 
     def __str__(self):
         scheme, netloc, path, params, query, fragment = self.parts
@@ -92,14 +96,6 @@ class MutableURL(object):
 
     def __repr__(self):
         return "<%s: %s>" % (self.__class__.__name__, str(self))
-
-    def _get_query(self):
-        return self._query
-
-    def _set_query(self, query):
-        self._query = query
-
-    query = property(_get_query, _set_query)
 
 
 class HttpDispatch(object):

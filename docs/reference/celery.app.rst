@@ -5,11 +5,6 @@
     .. contents::
         :local:
 
-    Functions
-    ---------
-
-    .. autofunction:: app_or_default
-
     Application
     -----------
 
@@ -49,8 +44,13 @@
 
         .. automethod:: mail_admins
 
-        .. automethod:: pre_config_merge
-        .. automethod:: post_config_merge
+        .. automethod:: prepare_config
 
         .. automethod:: either
         .. automethod:: merge
+
+    Functions
+    ---------
+
+    .. autofunction:: app_or_default
+
