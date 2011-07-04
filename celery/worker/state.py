@@ -27,6 +27,9 @@ reserved_requests = set()
 #: set of currently active :class:`~celery.worker.job.TaskRequest`'s.
 active_requests = set()
 
+#: set of currently active agents (actors)
+agents = set()
+
 #: count of tasks executed by the worker, sorted by type.
 total_count = defaultdict(lambda: 0)
 

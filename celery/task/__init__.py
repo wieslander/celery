@@ -2,13 +2,14 @@
 import warnings
 
 from celery.app import app_or_default
-from celery.task.base import Task, PeriodicTask
+from celery.app.task.actor import expose
+from celery.task.base import Actor, Task, PeriodicTask
 from celery.task.sets import TaskSet, subtask
 from celery.task.chords import chord
 from celery.task.control import discard_all
 
-__all__ = ["Task", "TaskSet", "PeriodicTask", "subtask",
-           "discard_all", "chord"]
+__all__ = ["Actor", "Task", "TaskSet", "PeriodicTask", "expose",
+           "subtask", "discard_all", "chord"]
 
 
 def task(*args, **kwargs):

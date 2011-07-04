@@ -52,6 +52,33 @@ class App(base.BaseApp):
         if self.set_as_current:
             self.set_current()
 
+    def create_actor_cls(self):
+        """Creates a base actor class using default configuration
+        taken from this app."""
+        conf = self.conf
+
+        from celery.app.task.actor import BaseActor
+
+        class Actor(BaseActor):
+            abstract = True
+            app = self
+            backend = self.backend
+            exchange_type = conf.CELERY_DEFAULT_EXCHANGE_TYPE
+            delivery_mode = conf.CELERY_DEFAULT_DELIVERY_MODE
+            send_error_emails = conf.CELERY_SEND_TASK_ERROR_EMAILS
+            error_whitelist = conf.CELERY_TASK_ERROR_WHITELIST
+            serializer = conf.CELERY_TASK_SERIALIZER
+            rate_limit = conf.CELERY_DEFAULT_RATE_LIMIT
+            track_started = conf.CELERY_TRACK_STARTED
+            acks_late = conf.CELERY_ACKS_LATE
+            ignore_result = conf.CELERY_IGNORE_RESULT
+            store_errors_even_if_ignored = \
+                conf.CELERY_STORE_ERRORS_EVEN_IF_IGNORED
+            accept_magic_kwargs = self.accept_magic_kwargs
+        Actor.__doc__ = BaseActor.__doc__
+
+        return Actor
+
     def create_task_cls(self):
         """Creates a base task class using default configuration
         taken from this app."""
@@ -161,6 +188,11 @@ class App(base.BaseApp):
     def Task(self):
         """Default Task base class for this application."""
         return self.create_task_cls()
+
+    @cached_property
+    def Actor(self):
+        """Default Actor base class for this application."""
+        return self.create_actor_cls()
 
     def __repr__(self):
         return "<Celery: %s:0x%x>" % (self.main or "__main__", id(self), )

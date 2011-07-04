@@ -1,9 +1,11 @@
 from celery import current_app
 from celery.app.task import Context, TaskType, BaseTask  # noqa
+from celery.app.task.actor import expose
 from celery.schedules import maybe_schedule
 from celery.utils import deprecated
 from celery.utils import timeutils
 
+Actor = current_app.Actor
 Task = current_app.Task
 
 
