@@ -83,7 +83,7 @@ import threading
 import traceback
 import warnings
 
-from ..abstract import StartStopComponent
+from .. import abstract
 from ..app import app_or_default
 from ..datastructures import AttributeDict
 from ..exceptions import InvalidTaskError
@@ -131,7 +131,11 @@ body: %s {content_type:%s content_encoding:%s delivery_info:%s}\
 """
 
 
-class Component(StartStopComponent):
+class Namespace(abstract.Namespace):
+    name = "consumer"
+
+
+class Component(abstract.StartStopComponent):
     name = "worker.consumer"
     last = True
 
@@ -148,6 +152,43 @@ class Component(StartStopComponent):
                 app=w.app,
                 controller=w)
         return c
+
+
+class Events(abstract.Component):
+    name = "consumer.events"
+    #requires = ("connection", )
+
+    def __init__(self, c):
+        c.event_dispatcher = None
+
+    def create(self, c):
+        print("CREATE EVENTS")
+        prev = c.event_dispatcher
+        c.event_dispatcher = c.app.events.Dispatcher(c.connection,
+                                                     hostname=c.hostname,
+                                                     enabled=c.send_events)
+        if prev:
+            # Flush events sent while connection was down.
+            c.event_dispatcher.copy_buffer(prev)
+            c.event_dispatcher.flush()
+
+
+class Heartbeat(abstract.StartStopComponent):
+    """The thread that sends event heartbeats at regular intervals.
+
+    The heartbeats are used by monitors to detect that a worker
+    went offline."""
+
+    name = "consumer.heartbeat"
+    requires = ("events", )
+
+    def __init__(self, c):
+        c.heart = None
+
+    def create(self, c):
+        print("CREATE HB")
+        heart = c.heart = Heart(c.priority_timer, c.event_dispatcher)
+        return heart
 
 
 class QoS(object):
@@ -250,11 +291,6 @@ class Consumer(object):
     #: A :class:`celery.events.EventDispatcher` for sending events.
     event_dispatcher = None
 
-    #: The thread that sends event heartbeats at regular intervals.
-    #: The heartbeats are used by monitors to detect that a worker
-    #: went offline/disappeared.
-    heart = None
-
     #: The logger instance to use.  Defaults to the default Celery logger.
     logger = None
 
@@ -298,8 +334,6 @@ class Consumer(object):
         self.logger = logger
         self.hostname = hostname or socket.gethostname()
         self.initial_prefetch_count = initial_prefetch_count
-        self.event_dispatcher = None
-        self.heart = None
         self.pool = pool
         self.priority_timer = priority_timer or timer2.default_timer
         pidbox_state = AttributeDict(app=self.app,
@@ -316,6 +350,9 @@ class Consumer(object):
 
         self._does_info = self.logger.isEnabledFor(logging.INFO)
         self.strategies = {}
+
+        self.components = []
+        self.namespace = None
 
     def update_strategies(self):
         S = self.strategies
@@ -490,10 +527,8 @@ class Consumer(object):
         if not self._state == RUN:
             return
 
-        if self.heart:
-            # Stop the heartbeat thread if it's running.
-            self.logger.debug("Heart: Going into cardiac arrest...")
-            self.heart = self.heart.stop()
+        for component in reversed(self.components):
+            component.stop()
 
         self._debug("Cancelling task consumer...")
         if self.task_consumer:
@@ -605,33 +640,19 @@ class Consumer(object):
         # Setup the process mailbox.
         self.reset_pidbox_node()
 
-        # Flush events sent while connection was down.
-        prev_event_dispatcher = self.event_dispatcher
-        self.event_dispatcher = self.app.events.Dispatcher(self.connection,
-                                                hostname=self.hostname,
-                                                enabled=self.send_events)
-        if prev_event_dispatcher:
-            self.event_dispatcher.copy_buffer(prev_event_dispatcher)
-            self.event_dispatcher.flush()
-
-        # Restart heartbeat thread.
-        self.restart_heartbeat()
+        self.components = []
+        self.namespace = Namespace(app=self.app,
+                                   logger=self.logger).apply(self)
+        print("STARTING COMP: %r" % (self.components, ))
+        for component in self.components:
+            print("STARTING: %r" % (component, ))
+            component.start()
 
         # reload all task's execution strategies.
         self.update_strategies()
 
         # We're back!
         self._state = RUN
-
-    def restart_heartbeat(self):
-        """Restart the heartbeat thread.
-
-        This thread sends heartbeat events at intervals so monitors
-        can tell if the worker is off-line/missing.
-
-        """
-        self.heart = Heart(self.priority_timer, self.event_dispatcher)
-        self.heart.start()
 
     def _open_connection(self):
         """Establish the broker connection.

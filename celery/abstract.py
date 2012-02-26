@@ -15,7 +15,7 @@ from collections import defaultdict
 from importlib import import_module
 
 from .datastructures import DependencyGraph
-from .utils import instantiate
+from .utils import instantiate, qualname
 
 
 class Namespace(object):
@@ -194,17 +194,33 @@ class Component(object):
 class StartStopComponent(Component):
     abstract = True
     terminable = False
+    started = False
 
     def start(self):
-        return self.obj.start()
+        print("START: %r" % (self.obj, ))
+        if self.obj is not None:
+            self.namespace.logger.debug("Starting %s...", qualname(self))
+            ret = self.obj.start()
+            self.namespace.logger.debug("%s OK!", qualname(self))
+            self.started = True
+            return ret
 
     def stop(self):
-        return self.obj.stop()
+        if self.obj is not None:
+            self.namespace.logger.debug("Stopping %s...", qualname(self))
+            return self.obj.stop()
+
+    def restart(self):
+        if self.started:
+            self.stop()
+        self.start()
 
     def terminate(self):
-        if self.terminable:
-            return self.obj.terminate()
-        return self.obj.stop()
+        if self.obj is not None:
+            if self.terminable:
+                self.namespace.logger.debug("Terminating %s...", qualname(self))
+                return self.obj.terminate()
+            return self.obj.stop()
 
     def include(self, parent):
         if super(StartStopComponent, self).include(parent):
