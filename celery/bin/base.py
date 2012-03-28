@@ -9,11 +9,17 @@ from optparse import OptionParser, make_option as Option
 
 from .. import __version__, Celery
 from ..exceptions import CDeprecationWarning, CPendingDeprecationWarning
-
+from ..platforms import EX_FAILURE, EX_USAGE
 
 # always enable DeprecationWarnings, so our users can see them.
 for warning in (CDeprecationWarning, CPendingDeprecationWarning):
     warnings.simplefilter("once", warning, 0)
+
+ARGV_DISABLED = """
+Unrecognized command line arguments: %s
+
+Try --help?
+"""
 
 
 class Command(object):
@@ -94,6 +100,11 @@ class Command(object):
         """Get supported command line options."""
         return self.option_list
 
+    def expanduser(self, value):
+        if isinstance(value, basestring):
+            return os.path.expanduser(value)
+        return value
+
     def handle_argv(self, prog_name, argv):
         """Parses command line arguments from ``argv`` and dispatches
         to :meth:`run`.
@@ -105,20 +116,22 @@ class Command(object):
         and ``argv`` contains positional arguments.
 
         """
+
         options, args = self.parse_options(prog_name, argv)
-        for o in vars(options):
-            v = getattr(options, o)
-            if isinstance(v, basestring):
-                setattr(options, o, os.path.expanduser(v))
-        argv = map(lambda a: isinstance(a, basestring)
-                   and os.path.expanduser(a) or a, argv)
+        options = dict((k, self.expanduser(v))
+                        for k, v in vars(options).iteritems()
+                            if not k.startswith('_'))
+        argv = map(self.expanduser, argv)
+        self.check_args(args)
+        return self.run(*args, **options)
+
+    def check_args(self, args):
         if not self.supports_args and args:
-            sys.stderr.write(
-                "\nUnrecognized command line arguments: %s\n" % (
-                    ", ".join(args), ))
-            sys.stderr.write("\nTry --help?\n")
-            sys.exit(1)
-        return self.run(*args, **vars(options))
+            self.die(ARGV_DISABLED % (', '.join(args, )), EX_USAGE)
+
+    def die(self, msg, status=EX_FAILURE):
+        sys.stderr.write(msg + "\n")
+        sys.exit(status)
 
     def parse_options(self, prog_name, arguments):
         """Parse the available options."""
@@ -128,8 +141,7 @@ class Command(object):
             print(self.version)
             sys.exit(0)
         parser = self.create_parser(prog_name)
-        options, args = parser.parse_args(arguments)
-        return options, args
+        return parser.parse_args(arguments)
 
     def create_parser(self, prog_name):
         return self.Parser(prog=prog_name,
@@ -163,16 +175,17 @@ class Command(object):
         if config_module:
             os.environ["CELERY_CONFIG_MODULE"] = config_module
         if app:
-            self.app = self.get_cls_by_name(app)
+            self.app = self.symbol_by_name(app)
         else:
             self.app = self.get_app(loader=loader)
         if self.enable_config_from_cmdline:
             argv = self.process_cmdline_config(argv)
         return argv
 
-    def get_cls_by_name(self, name):
-        from ..utils import get_cls_by_name, import_from_cwd
-        return get_cls_by_name(name, imp=import_from_cwd)
+    def symbol_by_name(self, name):
+        from ..utils.imports import symbol_by_name, import_from_cwd
+        return symbol_by_name(name, imp=import_from_cwd)
+    get_cls_by_name = symbol_by_name  # XXX compat
 
     def process_cmdline_config(self, argv):
         try:

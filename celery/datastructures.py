@@ -18,12 +18,10 @@ import traceback
 
 from collections import defaultdict
 from itertools import chain
-from threading import RLock
 
 from kombu.utils.limits import TokenBucket  # noqa
 
-from .utils import uniq
-from .utils.compat import UserDict, OrderedDict
+from .utils.functional import LRUCache, first, uniq  # noqa
 
 
 class CycleError(Exception):
@@ -52,7 +50,7 @@ class DependencyGraph(object):
 
     def add_arc(self, obj):
         """Add an object to the graph."""
-        self.adjacent[obj] = []
+        self.adjacent.setdefault(obj, [])
 
     def add_edge(self, A, B):
         """Add an edge from object ``A`` to object ``B``
@@ -84,7 +82,10 @@ class DependencyGraph(object):
 
     def valency_of(self, obj):
         """Returns the velency (degree) of a vertex in the graph."""
-        l = [len(self[obj])]
+        try:
+            l = [len(self[obj])]
+        except KeyError:
+            return 0
         for node in self[obj]:
             l.append(self.valency_of(node))
         return sum(l)
@@ -183,6 +184,9 @@ class DependencyGraph(object):
     def __len__(self):
         return len(self.adjacent)
 
+    def __contains__(self, obj):
+        return obj in self.adjacent
+
     def _iterate_items(self):
         return self.adjacent.iteritems()
     items = iteritems = _iterate_items
@@ -192,10 +196,11 @@ class DependencyGraph(object):
 
     def repr_node(self, obj, level=1):
         output = ["%s(%s)" % (obj, self.valency_of(obj))]
-        for other in self[obj]:
-            d = "%s(%s)" % (other, self.valency_of(other))
-            output.append('     ' * level + d)
-            output.extend(self.repr_node(other, level + 1).split('\n')[1:])
+        if obj in self:
+            for other in self[obj]:
+                d = "%s(%s)" % (other, self.valency_of(other))
+                output.append('     ' * level + d)
+                output.extend(self.repr_node(other, level + 1).split('\n')[1:])
         return '\n'.join(output)
 
 
@@ -299,6 +304,9 @@ class ConfigurationView(AttributeDictMixin):
 
     def __setitem__(self, key, value):
         self.changes[key] = value
+
+    def first(self, *keys):
+        return first(None, (self.get(key) for key in keys))
 
     def get(self, key, default=None):
         try:
@@ -532,68 +540,3 @@ class LimitedSet(object):
     def first(self):
         """Get the oldest member."""
         return self.chronologically[0]
-
-
-class LRUCache(UserDict):
-    """LRU Cache implementation using a doubly linked list to track access.
-
-    :keyword limit: The maximum number of keys to keep in the cache.
-        When a new key is inserted and the limit has been exceeded,
-        the *Least Recently Used* key will be discarded from the
-        cache.
-
-    """
-
-    def __init__(self, limit=None):
-        self.limit = limit
-        self.mutex = RLock()
-        self.data = OrderedDict()
-
-    def __getitem__(self, key):
-        with self.mutex:
-            value = self[key] = self.data.pop(key)
-        return value
-
-    def keys(self):
-        # userdict.keys in py3k calls __getitem__
-        return self.data.keys()
-
-    def values(self):
-        return list(self._iterate_values())
-
-    def items(self):
-        return list(self._iterate_items())
-
-    def __setitem__(self, key, value):
-        # remove least recently used key.
-        with self.mutex:
-            if self.limit and len(self.data) >= self.limit:
-                self.data.pop(iter(self.data).next())
-            self.data[key] = value
-
-    def __iter__(self):
-        return self.data.iterkeys()
-
-    def _iterate_items(self):
-        for k in self:
-            try:
-                yield (k, self.data[k])
-            except KeyError:
-                pass
-    iteritems = _iterate_items
-
-    def _iterate_values(self):
-        for k in self:
-            try:
-                yield self.data[k]
-            except KeyError:  # pragma: no cover
-                pass
-    itervalues = _iterate_values
-
-    def incr(self, key, delta=1):
-        with self.mutex:
-            # this acts as memcached does- store as a string, but return a
-            # integer as long as it exists and we can cast it
-            newval = int(self.data.pop(key)) + delta
-            self[key] = str(newval)
-        return newval

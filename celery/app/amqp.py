@@ -19,7 +19,8 @@ from kombu.pools import ProducerPool
 
 from .. import routes as _routes
 from .. import signals
-from ..utils import cached_property, textindent, uuid
+from ..utils import cached_property, lpmerge, uuid
+from ..utils import text
 
 #: List of known options to a Kombu producers send method.
 #: Used to extract the message related options out of any `dict`.
@@ -96,8 +97,8 @@ class Queues(dict):
                     name=(name + ":").ljust(12), **config)
                         for name, config in sorted(active.iteritems())]
         if indent_first:
-            return textindent("\n".join(info), indent)
-        return info[0] + "\n" + textindent("\n".join(info[1:]), indent)
+            return text.indent("\n".join(info), indent)
+        return info[0] + "\n" + text.indent("\n".join(info[1:]), indent)
 
     def select_subset(self, wanted, create_missing=True):
         """Select subset of the currently defined queues.
@@ -112,17 +113,18 @@ class Queues(dict):
                                  in `wanted` will raise :exc:`KeyError`.
 
         """
-        acc = {}
-        for queue in wanted:
-            try:
-                options = self[queue]
-            except KeyError:
-                if not create_missing:
-                    raise
-                options = self.options(queue, queue)
-            acc[queue] = options
-        self._consume_from = acc
-        self.update(acc)
+        if wanted:
+            acc = {}
+            for queue in wanted:
+                try:
+                    options = self[queue]
+                except KeyError:
+                    if not create_missing:
+                        raise
+                    options = self.options(queue, queue)
+                acc[queue] = options
+            self._consume_from = acc
+            self.update(acc)
 
     @property
     def consume_from(self):
@@ -183,7 +185,8 @@ class TaskPublisher(messaging.Publisher):
             countdown=None, eta=None, task_id=None, taskset_id=None,
             expires=None, exchange=None, exchange_type=None,
             event_dispatcher=None, retry=None, retry_policy=None,
-            queue=None, now=None, retries=0, chord=None, **kwargs):
+            queue=None, now=None, retries=0, chord=None, callbacks=None,
+            errbacks=None, **kwargs):
         """Send task message."""
 
         connection = self.connection
@@ -224,7 +227,9 @@ class TaskPublisher(messaging.Publisher):
                 "retries": retries or 0,
                 "eta": eta,
                 "expires": expires,
-                "utc": self.utc}
+                "utc": self.utc,
+                "callbacks": callbacks,
+                "errbacks": errbacks}
         if taskset_id:
             body["taskset"] = taskset_id
         if chord:
@@ -305,8 +310,7 @@ class AMQP(object):
         default_queue_name, default_queue = self.get_default_queue()
         defaults = dict({"queue": default_queue_name}, **default_queue)
         defaults["routing_key"] = defaults.pop("binding_key", None)
-        return self.Consumer(*args,
-                             **self.app.merge(defaults, kwargs))
+        return self.Consumer(*args, **lpmerge(defaults, kwargs))
 
     def TaskPublisher(self, *args, **kwargs):
         """Returns publisher used to send tasks.
@@ -325,7 +329,7 @@ class AMQP(object):
                     "retry_policy": conf.CELERY_TASK_PUBLISH_RETRY_POLICY,
                     "enable_utc": conf.CELERY_ENABLE_UTC,
                     "app": self.app}
-        return TaskPublisher(*args, **self.app.merge(defaults, kwargs))
+        return TaskPublisher(*args, **lpmerge(defaults, kwargs))
 
     def get_task_consumer(self, connection, queues=None, **kwargs):
         """Return consumer configured to consume from all known task

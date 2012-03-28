@@ -78,19 +78,18 @@ from __future__ import with_statement
 
 import logging
 import socket
-import sys
 import threading
-import traceback
 import warnings
+
+from kombu.utils.encoding import safe_repr
 
 from .. import abstract
 from ..app import app_or_default
 from ..datastructures import AttributeDict
 from ..exceptions import InvalidTaskError
-from ..registry import tasks
-from ..utils import noop
 from ..utils import timer2
-from ..utils.encoding import safe_repr
+from ..utils.functional import noop
+
 from . import state
 from .control import Panel
 from .heartbeat import Heart
@@ -356,7 +355,7 @@ class Consumer(object):
 
     def update_strategies(self):
         S = self.strategies
-        for task in tasks.itervalues():
+        for task in self.app.tasks.itervalues():
             S[task.name] = task.start_strategy(self.app, self)
 
     def start(self):
@@ -377,7 +376,7 @@ class Consumer(object):
             except self.connection_errors + self.channel_errors:
                 self.logger.error("Consumer: Connection to broker lost."
                                 + " Trying to re-establish the connection...",
-                                exc_info=sys.exc_info())
+                                exc_info=True)
 
     def consume_messages(self):
         """Consume messages forever (or until an exception is raised)."""
@@ -411,8 +410,8 @@ class Consumer(object):
             self.logger.info("Got task from broker: %s", task.shortinfo())
 
         if self.event_dispatcher.enabled:
-            self.event_dispatcher.send("task-received", uuid=task.task_id,
-                    name=task.task_name, args=safe_repr(task.args),
+            self.event_dispatcher.send("task-received", uuid=task.id,
+                    name=task.name, args=safe_repr(task.args),
                     kwargs=safe_repr(task.kwargs),
                     retries=task.request_dict.get("retries", 0),
                     eta=task.eta and task.eta.isoformat(),
@@ -425,7 +424,7 @@ class Consumer(object):
                 self.logger.error(
                     "Couldn't convert eta %s to timestamp: %r. Task: %r",
                     task.eta, exc, task.info(safe=True),
-                    exc_info=sys.exc_info())
+                    exc_info=True)
                 task.acknowledge()
             else:
                 self.qos.increment()
@@ -443,8 +442,8 @@ class Consumer(object):
             self.logger.error("No such control command: %s", exc)
         except Exception, exc:
             self.logger.error(
-                "Error occurred while handling control command: %r\n%r",
-                    exc, traceback.format_exc(), exc_info=sys.exc_info())
+                "Error occurred while handling control command: %r",
+                    exc, exc_info=True)
             self.reset_pidbox_node()
 
     def apply_eta_task(self, task):
@@ -474,19 +473,19 @@ class Consumer(object):
                 "Received and deleted unknown message. Wrong destination?!? \
                 the full contents of the message body was: %s" % (
                  self._message_report(body, message), )))
-            message.ack_log_error(self.logger, self.connection_errors)
+            message.reject_log_error(self.logger, self.connection_errors)
             return
 
         try:
             self.strategies[name](message, body, message.ack_log_error)
         except KeyError, exc:
             self.logger.error(UNKNOWN_TASK_ERROR, exc, safe_repr(body),
-                              exc_info=sys.exc_info())
-            message.ack_log_error(self.logger, self.connection_errors)
+                              exc_info=True)
+            message.reject_log_error(self.logger, self.connection_errors)
         except InvalidTaskError, exc:
             self.logger.error(INVALID_TASK_ERROR, str(exc), safe_repr(body),
-                              exc_info=sys.exc_info())
-            message.ack_log_error(self.logger, self.connection_errors)
+                              exc_info=True)
+            message.reject_log_error(self.logger, self.connection_errors)
 
     def maybe_conn_error(self, fun):
         """Applies function but ignores any connection or channel

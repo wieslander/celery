@@ -44,7 +44,7 @@ def str_to_bool(term, table={"false": False, "no": False, "0": False,
     try:
         return table[term.lower()]
     except KeyError:
-        raise TypeError("%r can not be converted to type bool" % (term, ))
+        raise TypeError("Can't coerce %r to type bool" % (term, ))
 
 
 class Option(object):
@@ -233,6 +233,7 @@ def find_deprecated_settings(source):
                             deprecation=opt.deprecate_by,
                             removal=opt.remove_by,
                             alternative=opt.alt)
+    return source
 
 
 @memoize(maxsize=None)

@@ -12,6 +12,9 @@
     celery.app.task
     celery.app.amqp
     celery.app.defaults
+    celery.app.control
+    celery.app.registry
+    celery.app.builtins
     celery.task
     celery.task.base
     celery.task.sets

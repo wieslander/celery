@@ -76,7 +76,7 @@ def safe_apply_callback(fun, *args):
             fun(*args)
         except BaseException, exc:
             error("Pool callback raised exception: %r", exc,
-                  exc_info=sys.exc_info())
+                  exc_info=True)
 
 
 class LaxBoundedSemaphore(threading._Semaphore):
@@ -239,7 +239,7 @@ class PoolThread(threading.Thread):
             return self.body()
         except Exception, exc:
             error("Thread %r crashed: %r" % (self.__class__.__name__, exc, ),
-                  exc_info=sys.exc_info())
+                  exc_info=True)
             os._exit(1)
 
     def terminate(self):
@@ -401,7 +401,7 @@ class TimeoutHandler(PoolThread):
                 elif i not in dirty and _timed_out(ack_time, soft_timeout):
                     _on_soft_timeout(job, i, soft_timeout)
 
-            time.sleep(0.5)                     # Don't waste CPU cycles.
+            time.sleep(1.0)                     # Don't waste CPU cycles.
 
         debug('timeout handler exiting')
 
@@ -562,13 +562,13 @@ class Pool(object):
 
         self._pool = []
         self._poolctrl = {}
+        self._putlock = LaxBoundedSemaphore(self._processes)
         for i in range(processes):
             self._create_worker_process()
 
         self._worker_handler = self.Supervisor(self)
         self._worker_handler.start()
 
-        self._putlock = LaxBoundedSemaphore(self._processes)
         self._task_handler = self.TaskHandler(self._taskqueue,
                                               self._quick_put,
                                               self._outqueue,

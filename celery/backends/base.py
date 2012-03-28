@@ -8,15 +8,18 @@ import sys
 from datetime import timedelta
 
 from kombu import serialization
+from kombu.utils.encoding import bytes_to_str, ensure_bytes, from_utf8
 
 from .. import states
+from ..app import current_task
 from ..datastructures import LRUCache
 from ..exceptions import TimeoutError, TaskRevokedError
 from ..utils import timeutils
-from ..utils.encoding import bytes_to_str, ensure_bytes, from_utf8
-from ..utils.serialization import (get_pickled_exception,
-                                   get_pickleable_exception,
-                                   create_exception_cls)
+from ..utils.serialization import (
+        get_pickled_exception,
+        get_pickleable_exception,
+        create_exception_cls,
+)
 
 EXCEPTION_ABLE_CODECS = frozenset(["pickle", "yaml"])
 is_py3k = sys.version_info >= (3, 0)
@@ -174,6 +177,10 @@ class BaseBackend(object):
         raise NotImplementedError(
                 "get_result is not supported by this backend.")
 
+    def get_children(self, task_id):
+        raise NotImplementedError(
+                "get_children is not supported by this backend.")
+
     def get_traceback(self, task_id):
         """Get the traceback for a failed task."""
         raise NotImplementedError(
@@ -207,10 +214,14 @@ class BaseBackend(object):
         pass
 
     def on_chord_apply(self, setid, body, result=None, **kwargs):
-        from ..registry import tasks
-        kwargs["result"] = [r.task_id for r in result]
-        tasks["celery.chord_unlock"].apply_async((setid, body, ), kwargs,
-                                                 countdown=1)
+        kwargs["result"] = [r.id for r in result]
+        self.app.tasks["celery.chord_unlock"].apply_async((setid, body, ),
+                                                          kwargs, countdown=1)
+
+    def current_task_children(self):
+        current = current_task()
+        if current:
+            return [r.serializable() for r in current.request.children]
 
     def __reduce__(self, args=(), kwargs={}):
         return (unpickle_backend, (self.__class__, args, kwargs))
@@ -251,6 +262,13 @@ class BaseDictBackend(BaseBackend):
             return self.exception_to_python(meta["result"])
         else:
             return meta["result"]
+
+    def get_children(self, task_id):
+        """Get the list of subtasks sent by a task."""
+        try:
+            return self.get_task_meta(task_id)["children"]
+        except KeyError:
+            pass
 
     def get_task_meta(self, task_id, cache=True):
         if cache:
@@ -378,7 +396,8 @@ class KeyValueStoreBackend(BaseDictBackend):
         self.delete(self.get_key_for_task(task_id))
 
     def _store_result(self, task_id, result, status, traceback=None):
-        meta = {"status": status, "result": result, "traceback": traceback}
+        meta = {"status": status, "result": result, "traceback": traceback,
+                "children": self.current_task_children()}
         self.set(self.get_key_for_task(task_id), self.encode(meta))
         return result
 

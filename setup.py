@@ -115,12 +115,12 @@ except ImportError:
     install_requires.append("importlib")
 install_requires.extend([
     "anyjson>=0.3.1",
-    "kombu>=2.1.1,<3.0",
+    "kombu>=2.1.2,<3.0",
 ])
 if is_py3k:
-    install_requires.append("python-dateutil>=2.0.0")
+    install_requires.append("python-dateutil>=2.0")
 else:
-    install_requires.append("python-dateutil>=1.5.0,<2.0.0")
+    install_requires.append("python-dateutil>=1.5,<2.0")
 
 py_version = sys.version_info
 is_jython = sys.platform.startswith("java")
@@ -136,7 +136,7 @@ if is_jython:
 
 # -*- Tests Requires -*-
 
-tests_require = ["nose", "nose-cover3", "sqlalchemy", "mock"]
+tests_require = ["nose", "nose-cover3", "sqlalchemy", "mock", "cl"]
 if sys.version_info < (2, 7):
     tests_require.append("unittest2")
 elif sys.version_info <= (2, 5):
@@ -152,6 +152,7 @@ else:
 # -*- Entry Points -*- #
 
 console_scripts = entrypoints["console_scripts"] = [
+        'celery = celery.bin.celeryctl:main',
         'celeryd = celery.bin.celeryd:main',
         'celerybeat = celery.bin.celerybeat:main',
         'camqadm = celery.bin.camqadm:main',

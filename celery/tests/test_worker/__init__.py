@@ -344,7 +344,7 @@ class test_Consumer(Case):
 
         in_bucket = self.ready_queue.get_nowait()
         self.assertIsInstance(in_bucket, Request)
-        self.assertEqual(in_bucket.task_name, foo_task.name)
+        self.assertEqual(in_bucket.name, foo_task.name)
         self.assertEqual(in_bucket.execute(), 2 * 4 * 8)
         self.assertTrue(self.eta_schedule.empty())
 
@@ -554,14 +554,14 @@ class test_Consumer(Case):
         l.event_dispatcher = Mock()
         l.connection_errors = (socket.error, )
         l.logger = Mock()
-        m.ack = Mock()
-        m.ack.side_effect = socket.error("foo")
+        m.reject = Mock()
+        m.reject.side_effect = socket.error("foo")
         with self.assertWarnsRegex(RuntimeWarning, r'unknown message'):
             self.assertFalse(l.receive_message(m.decode(), m))
         with self.assertRaises(Empty):
             self.ready_queue.get_nowait()
         self.assertTrue(self.eta_schedule.empty())
-        m.ack.assert_called_with()
+        m.reject.assert_called_with()
         self.assertTrue(l.logger.critical.call_count)
 
     def test_receieve_message_eta(self):
@@ -591,7 +591,7 @@ class test_Consumer(Case):
         eta, priority, entry = in_hold
         task = entry.args[0]
         self.assertIsInstance(task, Request)
-        self.assertEqual(task.task_name, foo_task.name)
+        self.assertEqual(task.name, foo_task.name)
         self.assertEqual(task.execute(), 2 * 4 * 8)
         with self.assertRaises(Empty):
             self.ready_queue.get_nowait()
@@ -824,11 +824,12 @@ class test_WorkController(AppCase):
     def test_on_timer_tick(self):
         worker = WorkController(concurrency=1, loglevel=10)
         worker.logger = Mock()
-        worker.timer_debug = worker.logger.debug
 
         worker.on_timer_tick(30.0)
-        logged = worker.logger.debug.call_args[0][0]
-        self.assertIn("30.0", logged)
+        xargs = worker.logger.debug.call_args[0]
+        fmt, arg = xargs[0], xargs[1]
+        self.assertEqual(30.0, arg)
+        self.assertIn("Next eta %s secs", fmt)
 
     def test_process_task(self):
         worker = self.worker

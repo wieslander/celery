@@ -11,13 +11,15 @@
 """
 from __future__ import absolute_import
 
+from .. import current_app
 from ..app import app_or_default, current_task as _current_task
 from ..local import Proxy
+from ..utils import uuid
 
-from .base import Task, PeriodicTask        # noqa
-from .sets import group, TaskSet, subtask   # noqa
-from .chords import chord                   # noqa
-from .control import discard_all            # noqa
+from .base import BaseTask, Task, PeriodicTask  # noqa
+from .sets import group, TaskSet, subtask       # noqa
+from .chords import chord                       # noqa
+from .control import discard_all                # noqa
 
 current = Proxy(_current_task)
 
@@ -70,12 +72,14 @@ def periodic_task(*args, **options):
 
             .. code-block:: python
 
+                from celery.task import current
+
                 @task(exchange="feeds")
                 def refresh_feed(url):
                     try:
                         return Feed.objects.get(url=url).refresh()
                     except socket.error, exc:
-                        refresh_feed.retry(exc=exc)
+                        current.retry(exc=exc)
 
             Calling the resulting task:
 
@@ -87,7 +91,20 @@ def periodic_task(*args, **options):
     """
     return task(**dict({"base": PeriodicTask}, **options))
 
+backend_cleanup = Proxy(lambda: current_app.tasks["celery.backend_cleanup"])
 
-@task(name="celery.backend_cleanup")
-def backend_cleanup():
-    backend_cleanup.backend.cleanup()
+
+class chain(object):
+
+    def __init__(self, *tasks):
+        self.tasks = tasks
+
+    def apply_async(self, **kwargs):
+        tasks = [task.clone(task_id=uuid(), **kwargs)
+                    for task in self.tasks]
+        reduce(lambda a, b: a.link(b), tasks)
+        tasks[0].apply_async()
+        results = [task.type.AsyncResult(task.options["task_id"])
+                        for task in tasks]
+        reduce(lambda a, b: a.set_parent(b), reversed(results))
+        return results[-1]

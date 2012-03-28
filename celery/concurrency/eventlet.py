@@ -2,15 +2,15 @@
 from __future__ import absolute_import
 
 import os
-import sys
-
-from time import time
-
 if not os.environ.get("EVENTLET_NOPATCH"):
     import eventlet
     import eventlet.debug
     eventlet.monkey_patch()
     eventlet.debug.hub_prevent_multiple_readers(False)
+
+import sys
+
+from time import time
 
 from .. import signals
 from ..utils import timer2
@@ -102,6 +102,7 @@ class Timer(timer2.Timer):
 class TaskPool(base.BasePool):
     Timer = Timer
 
+    rlimit_safe = False
     signal_safe = False
     is_green = True
 

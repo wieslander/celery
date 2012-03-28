@@ -117,7 +117,7 @@ class SimpleRequest(object):
 
     @classmethod
     def from_request(cls, request):
-        return cls(request.task_id, request.task_name, request.args,
+        return cls(request.id, request.name, request.args,
                    request.kwargs, request.delivery_info, request.hostname)
 
 
@@ -166,7 +166,7 @@ class Batches(Task):
         if self._buffer.qsize():
             requests = list(consume_queue(self._buffer))
             if requests:
-                self.debug("Buffer complete: %s" % (len(requests), ))
+                self.debug("Buffer complete: %s", len(requests))
                 self.flush(requests)
         if not requests:
             self.debug("Cancelling timer: Nothing in buffer.")

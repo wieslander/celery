@@ -11,6 +11,7 @@
 
 """
 from __future__ import absolute_import
+from __future__ import with_statement
 
 import errno
 import os
@@ -53,12 +54,12 @@ def pyimplementation():
     if hasattr(_platform, "python_implementation"):
         return _platform.python_implementation()
     elif sys.platform.startswith("java"):
-        return "Jython %s" % (sys.platform, )
+        return "Jython " + sys.platform
     elif hasattr(sys, "pypy_version_info"):
         v = ".".join(map(str, sys.pypy_version_info[:3]))
         if sys.pypy_version_info[3:]:
             v += "-" + "".join(map(str, sys.pypy_version_info[3:]))
-        return "PyPy %s" % (v, )
+        return "PyPy " + v
     else:
         return "CPython"
 
@@ -125,11 +126,16 @@ class PIDFile(object):
                 return
             raise
 
-        line = fh.readline().strip()
-        fh.close()
+        try:
+            line = fh.readline()
+            if line.strip() == line:  # must contain '\n'
+                raise ValueError(
+                    "Partially written or invalid pidfile %r" % (self.path))
+        finally:
+            fh.close()
 
         try:
-            return int(line)
+            return int(line.strip())
         except ValueError:
             raise ValueError("PID file %r contents invalid." % self.path)
 
@@ -165,6 +171,9 @@ class PIDFile(object):
         return False
 
     def write_pid(self):
+        pid = os.getpid()
+        content = "%d\n" % (pid, )
+
         open_flags = (os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         open_mode = (((os.R_OK | os.W_OK) << 6) |
                         ((os.R_OK) << 3) |
@@ -172,10 +181,20 @@ class PIDFile(object):
         pidfile_fd = os.open(self.path, open_flags, open_mode)
         pidfile = os.fdopen(pidfile_fd, "w")
         try:
-            pid = os.getpid()
-            pidfile.write("%d\n" % (pid, ))
+            pidfile.write(content)
+            # flush and sync so that the re-read below works.
+            pidfile.flush()
+            try:
+                os.fsync(pidfile_fd)
+            except AttributeError:
+                pass
         finally:
             pidfile.close()
+
+        with open(self.path) as fh:
+            if fh.read() != content:
+                raise LockFailed(
+                    "Inconsistency: Pidfile content doesn't match at re-read")
 
 
 def create_pidlock(pidfile):
@@ -214,14 +233,16 @@ class DaemonContext(object):
     workdir = DAEMON_WORKDIR
     umask = DAEMON_UMASK
 
-    def __init__(self, pidfile=None, workdir=None,
-            umask=None, **kwargs):
+    def __init__(self, pidfile=None, workdir=None, umask=None,
+            fake=False, **kwargs):
         self.workdir = workdir or self.workdir
         self.umask = self.umask if umask is None else umask
+        self.fake = fake
 
     def open(self):
         if not self._is_open:
-            self._detach()
+            if not self.fake:
+                self._detach()
 
             os.chdir(self.workdir)
             os.umask(self.umask)
@@ -256,7 +277,7 @@ class DaemonContext(object):
 
 
 def detached(logfile=None, pidfile=None, uid=None, gid=None, umask=0,
-             workdir=None, **opts):
+             workdir=None, fake=False, **opts):
     """Detach the current process in the background (daemonize).
 
     :keyword logfile: Optional log file.  The ability to write to this file
@@ -270,6 +291,7 @@ def detached(logfile=None, pidfile=None, uid=None, gid=None, umask=0,
       privileges to.
     :keyword umask: Optional umask that will be effective in the child process.
     :keyword workdir: Optional new working directory.
+    :keyword fake: Don't actually detach, intented for debugging purposes.
     :keyword \*\*opts: Ignored.
 
     **Example**:
@@ -307,7 +329,7 @@ def detached(logfile=None, pidfile=None, uid=None, gid=None, umask=0,
     # Doesn't actually create the pidfile, but makes sure it's not stale.
     pidfile and create_pidlock(pidfile)
 
-    return DaemonContext(umask=umask, workdir=workdir)
+    return DaemonContext(umask=umask, workdir=workdir, fake=fake)
 
 
 def parse_uid(uid):

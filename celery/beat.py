@@ -23,15 +23,17 @@ try:
 except ImportError:
     multiprocessing = None  # noqa
 
+from kombu.utils import reprcall
+from kombu.utils.functional import maybe_promise
+
 from . import __version__
 from . import platforms
-from . import registry
 from . import signals
 from . import current_app
 from .app import app_or_default
-from .log import SilenceRepeated
 from .schedules import maybe_schedule, crontab
-from .utils import cached_property, instantiate, maybe_promise
+from .utils import cached_property
+from .utils.imports import instantiate
 from .utils.timeutils import humanize_seconds
 
 
@@ -109,15 +111,16 @@ class ScheduleEntry(object):
                               "options": other.options})
 
     def is_due(self):
-        """See :meth:`celery.task.base.PeriodicTask.is_due`."""
+        """See :meth:`~celery.schedule.schedule.is_due`."""
         return self.schedule.is_due(self.last_run_at)
 
     def __iter__(self):
         return vars(self).iteritems()
 
     def __repr__(self):
-        return ("<Entry: %(name)s %(task)s(*%(args)s, **%(kwargs)s) "
-                "{%(schedule)s}>" % vars(self))
+        return ("<Entry: %s %s {%s}" % (self.name,
+                    reprcall(self.task, self.args, self.kwargs),
+                    self.schedule))
 
 
 class Scheduler(object):
@@ -176,10 +179,9 @@ class Scheduler(object):
             except Exception, exc:
                 self.logger.error("Message Error: %s\n%s", exc,
                                   traceback.format_stack(),
-                                  exc_info=sys.exc_info())
+                                  exc_info=True)
             else:
-                self.logger.debug("%s sent. id->%s", entry.task,
-                                                     result.task_id)
+                self.logger.debug("%s sent. id->%s", entry.task, result.id)
         return next_time_to_run
 
     def tick(self):
@@ -212,7 +214,7 @@ class Scheduler(object):
         # so we have that done if an exception is raised (doesn't schedule
         # forever.)
         entry = self.reserve(entry)
-        task = registry.tasks.get(entry.task)
+        task = self.app.tasks.get(entry.task)
 
         try:
             if task:
@@ -385,8 +387,6 @@ class Service(object):
 
         self._is_shutdown = threading.Event()
         self._is_stopped = threading.Event()
-        self.debug = SilenceRepeated(self.logger.debug,
-                        10 if self.max_interval < 60 else 1)
 
     def start(self, embedded_process=False):
         self.logger.info("Celerybeat: Starting...")
@@ -401,8 +401,8 @@ class Service(object):
         try:
             while not self._is_shutdown.isSet():
                 interval = self.scheduler.tick()
-                self.debug("Celerybeat: Waking up %s." % (
-                        humanize_seconds(interval, prefix="in ")))
+                self.logger.debug("Celerybeat: Waking up %s.",
+                                   humanize_seconds(interval, prefix="in "))
                 time.sleep(interval)
         except (KeyboardInterrupt, SystemExit):
             self._is_shutdown.set()

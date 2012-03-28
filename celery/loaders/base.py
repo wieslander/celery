@@ -20,14 +20,15 @@ import warnings
 from anyjson import deserialize
 from datetime import datetime
 
+from kombu.utils.encoding import safe_str
+
 from ..datastructures import DictAttribute
 from ..exceptions import ImproperlyConfigured
-from ..utils import (cached_property, get_cls_by_name,
-                     import_from_cwd as _import_from_cwd)
+from ..utils import cached_property
+from ..utils.imports import import_from_cwd, symbol_by_name
 from ..utils.functional import maybe_list
-from ..utils.encoding import safe_str
 
-BUILTIN_MODULES = frozenset(["celery.task"])
+BUILTIN_MODULES = frozenset()
 
 ERROR_ENVVAR_NOT_SET = (
 """The environment variable %r is not set,
@@ -93,7 +94,7 @@ class BaseLoader(object):
         return importlib.import_module(module, package=package)
 
     def import_from_cwd(self, module, imp=None, package=None):
-        return _import_from_cwd(module,
+        return import_from_cwd(module,
                 self.import_module if imp is None else imp,
                 package=package)
 
@@ -122,7 +123,7 @@ class BaseLoader(object):
         if isinstance(obj, basestring):
             try:
                 if "." in obj:
-                    obj = get_cls_by_name(obj, imp=self.import_from_cwd)
+                    obj = symbol_by_name(obj, imp=self.import_from_cwd)
                 else:
                     obj = self.import_from_cwd(obj)
             except (ImportError, AttributeError):

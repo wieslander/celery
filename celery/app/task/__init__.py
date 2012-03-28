@@ -15,21 +15,34 @@ from __future__ import absolute_import
 import sys
 import threading
 
+from ... import current_app
 from ... import states
 from ...datastructures import ExceptionInfo
 from ...exceptions import MaxRetriesExceededError, RetryTaskError
-from ...execute.trace import eager_trace_task
-from ...registry import tasks, _unpickle_task
 from ...result import EagerResult
-from ...utils import (fun_takes_kwargs, instantiate,
-                      mattrgetter, uuid, maybe_reraise)
+from ...utils import fun_takes_kwargs, uuid, maybe_reraise
+from ...utils.functional import mattrgetter, maybe_list
+from ...utils.imports import instantiate
 from ...utils.mail import ErrorMail
+from ...utils.compat import fun_of_method
 
+from ..state import current_task
+from ..registry import _unpickle_task
+
+#: extracts options related to publishing a message from a dict.
 extract_exec_options = mattrgetter("queue", "routing_key",
                                    "exchange", "immediate",
                                    "mandatory", "priority",
                                    "serializer", "delivery_mode",
                                    "compression", "expires")
+
+
+#: list of methods that should be classmethods in
+#: backward compatibility mode.
+_COMPAT_CLASSMETHODS = ("get_logger", "establish_connection",
+                        "get_publisher", "get_consumer",
+                        "delay", "apply_async", "retry",
+                        "apply", "AsyncResult", "subtask")
 
 
 class Context(threading.local):
@@ -46,6 +59,9 @@ class Context(threading.local):
     taskset = None
     chord = None
     called_directly = True
+    callbacks = None
+    errbacks = None
+    _children = None   # see property
 
     def update(self, d, **kwargs):
         self.__dict__.update(d, **kwargs)
@@ -61,6 +77,13 @@ class Context(threading.local):
 
     def __repr__(self):
         return "<Context: %r>" % (vars(self, ))
+
+    @property
+    def children(self):
+        # children must be an empy list for every thread
+        if self._children is None:
+            self._children = []
+        return self._children
 
 
 class TaskType(type):
@@ -78,13 +101,29 @@ class TaskType(type):
         new = super(TaskType, cls).__new__
         task_module = attrs.get("__module__") or "__main__"
 
-        if "__call__" in attrs:
-            # see note about __call__ below.
-            attrs["__defines_call__"] = True
+        # In old Celery the @task decorator didn't exist, so one would create
+        # classes instead and use them directly (e.g. MyTask.apply_async()).
+        # the use of classmethods was a hack so that it was not necessary
+        # to instantiate the class before using it, but it has only
+        # given us pain (like all magic).
+        #
+        # This must be removed for 3.0.
+        if attrs.pop("compat", False):
+            for fun_name in _COMPAT_CLASSMETHODS:
+                if fun_name not in attrs:
+                    fun = fun_of_method(getattr(bases[0], fun_name))
+                    attrs[fun_name] = classmethod(fun)
 
         # - Abstract class: abstract attribute should not be inherited.
         if attrs.pop("abstract", None) or not attrs.get("autoregister", True):
             return new(cls, name, bases, attrs)
+
+        # The 'app' attribute is now a property, with the real app located
+        # in the '_app' attribute.  Previously this was a regular attribute,
+        # so we should support classes defining it.
+        app = attrs["_app"] = (attrs.pop("_app", None) or
+                               attrs.pop("app", None) or
+                               current_app)
 
         # - Automatically generate missing/empty name.
         autoname = False
@@ -97,41 +136,29 @@ class TaskType(type):
             attrs["name"] = '.'.join([module_name, name])
             autoname = True
 
-        # - Automatically generate __call__.
-        # If this or none of its bases define __call__, we simply
-        # alias it to the ``run`` method, as
-        # this means we can skip a stacktrace frame :)
-        if not (attrs.get("__call__")
-                or any(getattr(b, "__defines_call__", False) for b in bases)):
-            try:
-                attrs["__call__"] = attrs["run"]
-            except KeyError:
-
-                # the class does not yet define run,
-                # so we can't optimize this case.
-                def __call__(self, *args, **kwargs):
-                    return self.run(*args, **kwargs)
-                attrs["__call__"] = __call__
-
         # - Create and register class.
         # Because of the way import happens (recursively)
         # we may or may not be the first time the task tries to register
         # with the framework.  There should only be one class for each task
         # name, so we always return the registered version.
+        tasks = app._tasks
         task_name = attrs["name"]
         if task_name not in tasks:
             task_cls = new(cls, name, bases, attrs)
-            if autoname and task_module == "__main__" and task_cls.app.main:
-                task_name = task_cls.name = '.'.join([task_cls.app.main, name])
+            if autoname and task_module == "__main__" and app.main:
+                task_name = task_cls.name = '.'.join([app.main, name])
             tasks.register(task_cls)
+            task_cls.bind(app)
         task = tasks[task_name].__class__
 
         # decorate with annotations from config.
-        task.app.annotate_task(task)
+        app.annotate_task(task)
         return task
 
     def __repr__(cls):
-        return "<class Task of %s>" % (cls.app, )
+        if cls._app:
+            return "<class %s of %s>" % (cls.__name__, cls._app, )
+        return "<unbound %s>" % (cls.__name__, )
 
 
 class BaseTask(object):
@@ -148,8 +175,11 @@ class BaseTask(object):
     ErrorMail = ErrorMail
     MaxRetriesExceededError = MaxRetriesExceededError
 
+    #: Execution strategy used, or the qualified name of one.
+    Strategy = "celery.worker.strategy:default"
+
     #: The application instance associated with this task class.
-    app = None
+    _app = None
 
     #: Name of the task.
     name = None
@@ -273,11 +303,67 @@ class BaseTask(object):
     #: The type of task *(no longer used)*.
     type = "regular"
 
-    #: Execution strategy used, or the qualified name of one.
-    Strategy = "celery.worker.strategy:default"
+    from_config = (
+        ("exchange_type", "CELERY_DEFAULT_EXCHANGE_TYPE"),
+        ("delivery_mode", "CELERY_DEFAULT_DELIVERY_MODE"),
+        ("send_error_emails", "CELERY_SEND_TASK_ERROR_EMAILS"),
+        ("error_whitelist", "CELERY_TASK_ERROR_WHITELIST"),
+        ("serializer", "CELERY_TASK_SERIALIZER"),
+        ("rate_limit", "CELERY_DEFAULT_RATE_LIMIT"),
+        ("track_started", "CELERY_TRACK_STARTED"),
+        ("acks_late", "CELERY_ACKS_LATE"),
+        ("ignore_result", "CELERY_IGNORE_RESULT"),
+        ("store_errors_even_if_ignored",
+            "CELERY_STORE_ERRORS_EVEN_IF_IGNORED"),
+    )
 
+    # - Tasks are lazily bound, so that configuration is not set
+    # - until the task is actually used
+
+    @classmethod
+    def bind(cls, app):
+        cls._app = app
+        conf = app.conf
+
+        for attr_name, config_name in cls.from_config:
+            if getattr(cls, attr_name, None) is None:
+                setattr(cls, attr_name, conf[config_name])
+        cls.accept_magic_kwargs = app.accept_magic_kwargs
+        if cls.accept_magic_kwargs is None:
+            cls.accept_magic_kwargs = app.accept_magic_kwargs
+        if cls.backend is None:
+            cls.backend = app.backend
+
+        # e.g. PeriodicTask uses this to add itself to the PeriodicTask
+        # schedule.
+        cls.on_bound(app)
+
+        return app
+
+    @classmethod
+    def on_bound(self, app):
+        """This method can be defined to do additional actions when the
+        task class is bound to an app."""
+        pass
+
+    @classmethod
+    def _get_app(cls):
+        if cls._app is None:
+            cls.bind(current_app)
+        return cls._app
+
+    @classmethod
+    def _set_app(cls, app):
+        cls.bind(app)
+    app = property(_get_app, _set_app)
+
+    # - tasks are pickled into the name of the task only, and the reciever
+    # - simply grabs it from the local registry.
     def __reduce__(self):
         return (_unpickle_task, (self.name, ), None)
+
+    def __call__(self, *args, **kwargs):
+        return self.run(*args, **kwargs)
 
     def run(self, *args, **kwargs):
         """The body of the task executed by workers."""
@@ -286,21 +372,19 @@ class BaseTask(object):
     def start_strategy(self, app, consumer):
         return instantiate(self.Strategy, self, app, consumer)
 
-    @classmethod
     def get_logger(self, loglevel=None, logfile=None, propagate=False,
             **kwargs):
         """Get task-aware logger object."""
-        return self.app.log.setup_task_logger(
+        return self._get_app().log.setup_task_logger(
             loglevel=self.request.loglevel if loglevel is None else loglevel,
             logfile=self.request.logfile if logfile is None else logfile,
             propagate=propagate, task_name=self.name, task_id=self.request.id)
 
-    @classmethod
     def establish_connection(self, connect_timeout=None):
         """Establish a connection to the message broker."""
-        return self.app.broker_connection(connect_timeout=connect_timeout)
+        return self._get_app().broker_connection(
+                connect_timeout=connect_timeout)
 
-    @classmethod
     def get_publisher(self, connection=None, exchange=None,
             connect_timeout=None, exchange_type=None, **options):
         """Get a celery task message publisher.
@@ -327,13 +411,12 @@ class BaseTask(object):
         if exchange_type is None:
             exchange_type = self.exchange_type
         connection = connection or self.establish_connection(connect_timeout)
-        return self.app.amqp.TaskPublisher(connection=connection,
+        return self._get_app().amqp.TaskPublisher(connection=connection,
                                            exchange=exchange,
                                            exchange_type=exchange_type,
                                            routing_key=self.routing_key,
                                            **options)
 
-    @classmethod
     def get_consumer(self, connection=None, connect_timeout=None):
         """Get message consumer.
 
@@ -352,11 +435,10 @@ class BaseTask(object):
 
         """
         connection = connection or self.establish_connection(connect_timeout)
-        return self.app.amqp.TaskConsumer(connection=connection,
+        return self._get_app().amqp.TaskConsumer(connection=connection,
                                           exchange=self.exchange,
                                           routing_key=self.routing_key)
 
-    @classmethod
     def delay(self, *args, **kwargs):
         """Star argument version of :meth:`apply_async`.
 
@@ -370,10 +452,9 @@ class BaseTask(object):
         """
         return self.apply_async(args, kwargs)
 
-    @classmethod
     def apply_async(self, args=None, kwargs=None,
             task_id=None, publisher=None, connection=None,
-            router=None, queues=None, **options):
+            router=None, queues=None, link=None, link_error=None, **options):
         """Apply tasks asynchronously by sending a message.
 
         :keyword args: The positional arguments to pass on to the
@@ -450,38 +531,48 @@ class BaseTask(object):
                               :func:`kombu.compression.register`. Defaults to
                               the :setting:`CELERY_MESSAGE_COMPRESSION`
                               setting.
+        :keyword link: A single, or a list of subtasks to apply if the
+                       task exits successfully.
+        :keyword link_error: A single, or a list of subtasks to apply
+                      if an error occurs while executing the task.
 
         .. note::
             If the :setting:`CELERY_ALWAYS_EAGER` setting is set, it will
             be replaced by a local :func:`apply` call instead.
 
         """
-        router = self.app.amqp.Router(queues)
-        conf = self.app.conf
+        app = self._get_app()
+        router = app.amqp.Router(queues)
+        conf = app.conf
 
         if conf.CELERY_ALWAYS_EAGER:
             return self.apply(args, kwargs, task_id=task_id, **options)
         options = dict(extract_exec_options(self), **options)
         options = router.route(options, self.name, args, kwargs)
 
-        publish = publisher or self.app.amqp.publisher_pool.acquire(block=True)
+        publish = publisher or app.amqp.publisher_pool.acquire(block=True)
         evd = None
         if conf.CELERY_SEND_TASK_SENT_EVENT:
-            evd = self.app.events.Dispatcher(channel=publish.channel,
-                                             buffer_while_offline=False)
+            evd = app.events.Dispatcher(channel=publish.channel,
+                                        buffer_while_offline=False)
 
         try:
             task_id = publish.delay_task(self.name, args, kwargs,
                                          task_id=task_id,
                                          event_dispatcher=evd,
+                                         callbacks=maybe_list(link),
+                                         errbacks=maybe_list(link_error),
                                          **options)
         finally:
             if not publisher:
                 publish.release()
 
-        return self.AsyncResult(task_id)
+        result = self.AsyncResult(task_id)
+        parent = current_task()
+        if parent:
+            parent.request.children.append(result)
+        return result
 
-    @classmethod
     def retry(self, args=None, kwargs=None, exc=None, throw=True,
             eta=None, countdown=None, max_retries=None, **options):
         """Retry the task.
@@ -569,7 +660,6 @@ class BaseTask(object):
                 eta and "Retry at %s" % (eta, )
                      or "Retry in %s secs." % (countdown, ), exc)
 
-    @classmethod
     def apply(self, args=None, kwargs=None, **options):
         """Execute this task locally, by blocking until the task returns.
 
@@ -582,15 +672,19 @@ class BaseTask(object):
         :rtype :class:`celery.result.EagerResult`:
 
         """
+        # trace imports BaseTask, so need to import inline.
+        from ...execute.trace import eager_trace_task
+
+        app = self._get_app()
         args = args or []
         kwargs = kwargs or {}
         task_id = options.get("task_id") or uuid()
         retries = options.get("retries", 0)
-        throw = self.app.either("CELERY_EAGER_PROPAGATES_EXCEPTIONS",
-                                options.pop("throw", None))
+        throw = app.either("CELERY_EAGER_PROPAGATES_EXCEPTIONS",
+                           options.pop("throw", None))
 
         # Make sure we get the task instance, not class.
-        task = tasks[self.name]
+        task = app._tasks[self.name]
 
         request = {"id": task_id,
                    "retries": retries,
@@ -621,15 +715,14 @@ class BaseTask(object):
             state, tb = info.state, info.strtb
         return EagerResult(task_id, retval, state, traceback=tb)
 
-    @classmethod
     def AsyncResult(self, task_id):
         """Get AsyncResult instance for this kind of task.
 
         :param task_id: Task id to get result for.
 
         """
-        return self.app.AsyncResult(task_id, backend=self.backend,
-                                             task_name=self.name)
+        return self._get_app().AsyncResult(task_id, backend=self.backend,
+                                                    task_name=self.name)
 
     def update_state(self, task_id=None, state=None, meta=None):
         """Update task state.
@@ -735,7 +828,6 @@ class BaseTask(object):
         """`repr(task)`"""
         return "<@task: %s>" % (self.name, )
 
-    @classmethod
     def subtask(cls, *args, **kwargs):
         """Returns :class:`~celery.task.sets.subtask` object for
         this task, wrapping arguments and execution options

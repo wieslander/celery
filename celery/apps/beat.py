@@ -4,13 +4,13 @@ from __future__ import absolute_import
 import atexit
 import socket
 import sys
-import traceback
 
 from .. import __version__, platforms
 from .. import beat
 from ..app import app_or_default
 from ..app.abstract import configurated, from_config
-from ..utils import LOG_LEVELS, qualname
+from ..utils.imports import qualname
+from ..utils.log import LOG_LEVELS
 from ..utils.timeutils import humanize_seconds
 
 STARTUP_INFO_FMT = """
@@ -88,9 +88,9 @@ class Beat(configurated):
             self.install_sync_handler(beat)
             beat.start()
         except Exception, exc:
-            logger.critical("celerybeat raised exception %s: %r\n%s",
-                            exc.__class__, exc, traceback.format_exc(),
-                            exc_info=sys.exc_info())
+            logger.critical("celerybeat raised exception %s: %r",
+                            exc.__class__, exc,
+                            exc_info=True)
 
     def init_loader(self):
         # Run the worker init handler.

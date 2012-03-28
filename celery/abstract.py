@@ -15,7 +15,7 @@ from collections import defaultdict
 from importlib import import_module
 
 from .datastructures import DependencyGraph
-from .utils import instantiate, qualname
+from .utils.imports import instantiate, qualname
 
 
 class Namespace(object):
@@ -68,8 +68,7 @@ class Namespace(object):
         self._debug("Building boot step graph.")
         self.boot_steps = [self.bind_component(name, parent, **kwargs)
                                 for name in self._finalize_boot_steps()]
-        self._debug("New boot order: %r" % (
-            [c.name for c in self.boot_steps], ))
+        self._debug("New boot order: %r", [c.name for c in self.boot_steps])
 
         for component in self.boot_steps:
             component.include(parent)

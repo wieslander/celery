@@ -25,12 +25,11 @@ from kombu.utils.finalize import Finalize
 
 from .. import abstract
 from .. import concurrency as _concurrency
-from .. import registry
 from ..app import app_or_default
 from ..app.abstract import configurated, from_config
 from ..exceptions import SystemTerminate
-from ..log import SilenceRepeated
-from ..utils import noop, qualname, reload_from_cwd
+from ..utils.functional import noop
+from ..utils.imports import qualname, reload_from_cwd
 
 from . import state
 from .buckets import TaskBucket, FastQueue
@@ -131,7 +130,7 @@ class Queues(abstract.Component):
                 # just send task directly to pool, skip the mediator.
                 w.ready_queue.put = w.process_task
         else:
-            w.ready_queue = TaskBucket(task_registry=registry.tasks)
+            w.ready_queue = TaskBucket(task_registry=w.app.tasks)
 
 
 class Timers(abstract.Component):
@@ -208,8 +207,6 @@ class WorkController(configurated):
         self.logger = self.app.log.get_default_logger()
         self.hostname = hostname or socket.gethostname()
         self.ready_callback = ready_callback
-        self.timer_debug = SilenceRepeated(self.logger.debug,
-                                           max_iterations=10)
         self._finalize = Finalize(self, self.stop, exitpriority=1)
         self._finalize_db = None
 
@@ -232,8 +229,8 @@ class WorkController(configurated):
         except SystemTerminate:
             self.terminate()
         except Exception, exc:
-            self.logger.error("Unrecoverable error: %r" % (exc, ),
-                              exc_info=sys.exc_info())
+            self.logger.error("Unrecoverable error: %r", exc,
+                              exc_info=True)
             self.stop()
         except (KeyboardInterrupt, SystemExit):
             self.stop()
@@ -269,7 +266,7 @@ class WorkController(configurated):
             self._shutdown(warm=False)
 
     def _shutdown(self, warm=True):
-        what = (warm and "stopping" or "terminating").capitalize()
+        what = "Stopping" if warm else "Terminating"
 
         if self._state in (self.CLOSE, self.TERMINATE):
             return
@@ -301,10 +298,10 @@ class WorkController(configurated):
 
         for module in set(modules or ()):
             if module not in sys.modules:
-                self.logger.debug("importing module %s" % (module, ))
+                self.logger.debug("importing module %s", module)
                 imp(module)
             elif reload:
-                self.logger.debug("reloading module %s" % (module, ))
+                self.logger.debug("reloading module %s", module)
                 reload_from_cwd(sys.modules[module], reloader)
         self.pool.restart()
 
@@ -312,7 +309,7 @@ class WorkController(configurated):
         self.logger.error("Timer error: %r", einfo[1], exc_info=einfo)
 
     def on_timer_tick(self, delay):
-        self.timer_debug("Scheduler wake-up! Next eta %s secs." % delay)
+        self.logger.debug("Scheduler wake-up! Next eta %s secs.", delay)
 
     @property
     def state(self):

@@ -12,10 +12,13 @@
 from __future__ import absolute_import
 from __future__ import with_statement
 
+import celery
+import kombu
 import os
-import warnings
 import platform as _platform
+import warnings
 
+from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import wraps
@@ -24,19 +27,32 @@ from kombu.clocks import LamportClock
 
 from .. import datastructures
 from .. import platforms
+from ..backends import get_backend_cls
 from ..exceptions import AlwaysEagerIgnored
-from ..utils import cached_property, instantiate, lpmerge
+from ..loaders import get_loader_cls
+from ..local import maybe_evaluate
+from ..utils import cached_property, lpmerge, register_after_fork
+from ..utils.functional import first
+from ..utils.imports import instantiate, qualname
+from ..utils.text import pretty
 
+from .builtins import load_builtin_tasks
 from .defaults import DEFAULTS, find_deprecated_settings, find
 
 import kombu
 if kombu.VERSION < (2, 0):
     raise ImportError("Celery requires Kombu version 1.1.0 or higher.")
 
+SETTINGS_INFO = """%s %s"""
+
 BUGREPORT_INFO = """
-platform -> system:%(system)s arch:%(arch)s imp:%(py_i)s
 software -> celery:%(celery_v)s kombu:%(kombu_v)s py:%(py_v)s
+platform -> system:%(system)s arch:%(arch)s imp:%(py_i)s
+loader   -> %(loader)s
 settings -> transport:%(transport)s results:%(results)s
+
+%(human_settings)s
+
 """
 
 
@@ -45,15 +61,14 @@ class Settings(datastructures.ConfigurationView):
     @property
     def CELERY_RESULT_BACKEND(self):
         """Resolves deprecated alias ``CELERY_BACKEND``."""
-        return self.get("CELERY_RESULT_BACKEND") or self.get("CELERY_BACKEND")
+        return self.first("CELERY_RESULT_BACKEND", "CELERY_BACKEND")
 
     @property
     def BROKER_TRANSPORT(self):
         """Resolves compat aliases :setting:`BROKER_BACKEND`
         and :setting:`CARROT_BACKEND`."""
-        return (self.get("BROKER_TRANSPORT") or
-                self.get("BROKER_BACKEND") or
-                self.get("CARROT_BACKEND"))
+        return self.first("BROKER_TRANSPORT",
+                          "BROKER_BACKEND", "CARROT_BACKEND")
 
     @property
     def BROKER_BACKEND(self):
@@ -63,8 +78,14 @@ class Settings(datastructures.ConfigurationView):
     @property
     def BROKER_HOST(self):
         return (os.environ.get("CELERY_BROKER_URL") or
-                self.get("BROKER_URL") or
-                self.get("BROKER_HOST"))
+                self.first("BROKER_URL", "BROKER_HOST"))
+
+    def without_defaults(self):
+        # the last stash is the default settings, so just skip that
+        return Settings({}, self._order[:-1])
+
+    def find_value_for_key(self, name, namespace="celery"):
+        return self.get_by_parts(*self.find_option(name, namespace)[:-1])
 
     def find_option(self, name, namespace="celery"):
         return find(name, namespace)
@@ -72,29 +93,31 @@ class Settings(datastructures.ConfigurationView):
     def get_by_parts(self, *parts):
         return self["_".join(filter(None, parts))]
 
-    def find_value_for_key(self, name, namespace="celery"):
-        ns, key, _ = self.find_option(name, namespace=namespace)
-        return self.get_by_parts(ns, key)
+    def humanize(self):
+        return "\n".join(SETTINGS_INFO % (key + ':', pretty(value, width=50))
+                    for key, value in self.without_defaults().iteritems())
+
 
 
 class BaseApp(object):
     """Base class for apps."""
     SYSTEM = platforms.SYSTEM
-    IS_OSX = platforms.IS_OSX
-    IS_WINDOWS = platforms.IS_WINDOWS
+    IS_OSX, IS_WINDOWS = platforms.IS_OSX, platforms.IS_WINDOWS
 
     amqp_cls = "celery.app.amqp:AMQP"
     backend_cls = None
     events_cls = "celery.events:Events"
     loader_cls = "celery.loaders.app:AppLoader"
-    log_cls = "celery.log:Logging"
-    control_cls = "celery.task.control:Control"
-
+    log_cls = "celery.app.log:Logging"
+    control_cls = "celery.app.control:Control"
+    registry_cls = "celery.app.registry:TaskRegistry"
     _pool = None
 
     def __init__(self, main=None, loader=None, backend=None,
             amqp=None, events=None, log=None, control=None,
-            set_as_current=True, accept_magic_kwargs=False, **kwargs):
+            set_as_current=True, accept_magic_kwargs=False,
+            tasks=None, **kwargs):
+        self.clock = LamportClock()
         self.main = main
         self.amqp_cls = amqp or self.amqp_cls
         self.backend_cls = backend or self.backend_cls
@@ -103,14 +126,27 @@ class BaseApp(object):
         self.log_cls = log or self.log_cls
         self.control_cls = control or self.control_cls
         self.set_as_current = set_as_current
+        self.registry_cls = self.registry_cls if tasks is None else tasks
         self.accept_magic_kwargs = accept_magic_kwargs
-        self.clock = LamportClock()
+
+        self.finalized = False
+        self._pending = deque()
+        self._tasks = instantiate(self.registry_cls)
 
         self.on_init()
 
     def on_init(self):
         """Called at the end of the constructor."""
         pass
+
+    def finalize(self):
+        if not self.finalized:
+            load_builtin_tasks(self)
+
+            pending = self._pending
+            while pending:
+                maybe_evaluate(pending.pop())
+            self.finalized = True
 
     def config_from_object(self, obj, silent=False):
         """Read configuration from object, where object is either
@@ -139,11 +175,7 @@ class BaseApp(object):
         return self.loader.config_from_envvar(variable_name, silent=silent)
 
     def config_from_cmdline(self, argv, namespace="celery"):
-        """Read configuration from argv.
-
-        The config
-
-        """
+        """Read configuration from argv."""
         self.conf.update(self.loader.cmdline_config_parser(argv, namespace))
 
     def send_task(self, name, args=None, kwargs=None, countdown=None,
@@ -188,9 +220,9 @@ class BaseApp(object):
 
     def AsyncResult(self, task_id, backend=None, task_name=None):
         """Create :class:`celery.result.BaseAsyncResult` instance."""
-        from ..result import BaseAsyncResult
-        return BaseAsyncResult(task_id, app=self, task_name=task_name,
-                               backend=backend or self.backend)
+        from ..result import AsyncResult
+        return AsyncResult(task_id, app=self, task_name=task_name,
+                           backend=backend or self.backend)
 
     def TaskSetResult(self, taskset_id, results, **kwargs):
         """Create :class:`celery.result.TaskSetResult` instance."""
@@ -271,8 +303,7 @@ class BaseApp(object):
 
     def prepare_config(self, c):
         """Prepare configuration before it is merged with the defaults."""
-        find_deprecated_settings(c)
-        return c
+        return find_deprecated_settings(c)
 
     def now(self):
         return self.loader.now()
@@ -292,25 +323,15 @@ class BaseApp(object):
                                        use_tls=self.conf.EMAIL_USE_TLS)
 
     def select_queues(self, queues=None):
-        if queues:
-            return self.amqp.queues.select_subset(queues,
-                                    self.conf.CELERY_CREATE_MISSING_QUEUES)
+        return self.amqp.queues.select_subset(queues,
+                                self.conf.CELERY_CREATE_MISSING_QUEUES)
 
     def either(self, default_key, *values):
         """Fallback to the value of a configuration key if none of the
         `*values` are true."""
-        for value in values:
-            if value is not None:
-                return value
-        return self.conf.get(default_key)
-
-    def merge(self, l, r):
-        """Like `dict(a, **b)` except it will keep values from `a`
-        if the value in `b` is :const:`None`."""
-        return lpmerge(l, r)
+        return first(None, values) or self.conf.get(default_key)
 
     def _get_backend(self):
-        from ..backends import get_backend_cls
         return get_backend_cls(
                     self.backend_cls or self.conf.CELERY_RESULT_BACKEND,
                     loader=self.loader)(app=self)
@@ -325,8 +346,6 @@ class BaseApp(object):
             self._pool = None
 
     def bugreport(self):
-        import celery
-        import kombu
         return BUGREPORT_INFO % {"system": _platform.system(),
                                  "arch": _platform.architecture(),
                                  "py_i": platforms.pyimplementation(),
@@ -334,16 +353,14 @@ class BaseApp(object):
                                  "kombu_v": kombu.__version__,
                                  "py_v": _platform.python_version(),
                                  "transport": self.conf.BROKER_TRANSPORT,
-                                 "results": self.conf.CELERY_RESULT_BACKEND}
+                                 "results": self.conf.CELERY_RESULT_BACKEND,
+                                 "human_settings": self.conf.humanize(),
+                                 "loader": qualname(self.loader.__class__)}
 
     @property
     def pool(self):
         if self._pool is None:
-            try:
-                from multiprocessing.util import register_after_fork
-                register_after_fork(self, self._after_fork)
-            except ImportError:
-                pass
+            register_after_fork(self, self._after_fork)
             self._pool = self.broker_connection().Pool(
                             limit=self.conf.BROKER_POOL_LIMIT)
         return self._pool
@@ -367,7 +384,7 @@ class BaseApp(object):
     @cached_property
     def control(self):
         """Controlling worker nodes.  See
-        :class:`~celery.task.control.Control`."""
+        :class:`~celery.app.control.Control`."""
         return instantiate(self.control_cls, app=self)
 
     @cached_property
@@ -378,7 +395,6 @@ class BaseApp(object):
     @cached_property
     def loader(self):
         """Current loader."""
-        from ..loaders import get_loader_cls
         return get_loader_cls(self.loader_cls)(app=self)
 
     @cached_property
@@ -388,5 +404,10 @@ class BaseApp(object):
 
     @cached_property
     def tasks(self):
-        from ..registry import tasks
-        return tasks
+        """Registry of available tasks.
+
+        Accessing this attribute will also finalize the app.
+
+        """
+        self.finalize()
+        return self._tasks

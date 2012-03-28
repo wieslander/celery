@@ -12,11 +12,16 @@
 from __future__ import absolute_import
 from __future__ import with_statement
 
-from .. import registry
-from ..app import app_or_default
+from itertools import chain
+
+from kombu.utils import reprcall
+
+from .. import current_app
+from ..app import app_or_default, current_task
 from ..datastructures import AttributeDict
-from ..utils import cached_property, reprcall, uuid
-from ..utils.compat import UserList
+from ..utils import cached_property, uuid
+from ..utils.functional import maybe_list
+from ..utils.compat import UserList, chain_from_iterable
 
 
 class subtask(AttributeDict):
@@ -29,8 +34,7 @@ class subtask(AttributeDict):
     :param task: Either a task class/instance, or the name of a task.
     :keyword args: Positional arguments to apply.
     :keyword kwargs: Keyword arguments to apply.
-    :keyword options: Additional options to
-      :func:`celery.execute.apply_async`.
+    :keyword options: Additional options to :meth:`Task.apply_async`.
 
     Note that if the first argument is a :class:`dict`, the other
     arguments will be ignored and the values in the dict will be used
@@ -70,6 +74,12 @@ class subtask(AttributeDict):
         options = dict(self.options, **options)
         return self.type.apply(args, kwargs, **options)
 
+    def clone(self, args=(), kwargs={}, **options):
+        return self.__class__(self.task,
+                              args=tuple(args) + tuple(self.args),
+                              kwargs=dict(self.kwargs, **kwargs),
+                              options=dict(self.options, **options))
+
     def apply_async(self, args=(), kwargs={}, **options):
         """Apply this task asynchronously."""
         # For callbacks: extra args are prepended to the stored args.
@@ -77,6 +87,25 @@ class subtask(AttributeDict):
         kwargs = dict(self.kwargs, **kwargs)
         options = dict(self.options, **options)
         return self.type.apply_async(args, kwargs, **options)
+
+    def link(self, callback):
+        """Add a callback task to be applied if this task
+        executes successfully."""
+        self.options.setdefault("link", []).append(callback)
+        return callback
+
+    def link_error(self, errback):
+        """Add a callback task to be applied if an error occurs
+        while executing this task."""
+        self.options.setdefault("link_error", []).append(errback)
+        return errback
+
+    def flatten_links(self):
+        """Gives a recursive list of dependencies (unchain if you will,
+        but with links intact)."""
+        return list(chain_from_iterable(chain([[self]],
+                (link.flatten_links()
+                    for link in maybe_list(self.options.get("link")) or []))))
 
     def __reduce__(self):
         # for serialization, the task type is lazily loaded,
@@ -88,7 +117,7 @@ class subtask(AttributeDict):
 
     @cached_property
     def type(self):
-        return registry.tasks[self.task]
+        return current_app.tasks[self.task]
 
 
 def maybe_subtask(t):
@@ -137,7 +166,11 @@ class TaskSet(UserList):
                 if not publisher:  # created by us.
                     pub.close()
 
-            return app.TaskSetResult(setid, results)
+            result = app.TaskSetResult(setid, results)
+            parent = current_task()
+            if parent:
+                parent.request.children.append(result)
+            return result
 
     def _async_results(self, taskset_id, publisher):
         return [task.apply_async(taskset_id=taskset_id, publisher=publisher)

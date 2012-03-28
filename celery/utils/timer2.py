@@ -189,9 +189,17 @@ class Timer(Thread):
         try:
             entry()
         except Exception, exc:
-            if not self.schedule.handle_error(sys.exc_info()):
-                warnings.warn(TimedFunctionFailed(repr(exc))),
-                traceback.print_stack()
+            exc_info = sys.exc_info()
+            try:
+                if not self.schedule.handle_error(exc_info):
+                    warnings.warn(TimedFunctionFailed(repr(exc))),
+                    sys.stderr.write("Error in timer: %r\n" % (exc, ))
+                    traceback.print_exception(exc_info[0],
+                                              exc_info[1],
+                                              exc_info[2],
+                                              None, sys.stderr)
+            finally:
+                del(exc_info)
 
     def _next_entry(self):
         with self.not_empty:
@@ -224,7 +232,7 @@ class Timer(Thread):
                 pass
         except Exception, exc:
             self.logger.error("Thread Timer crashed: %r", exc,
-                              exc_info=sys.exc_info())
+                              exc_info=True)
             os._exit(1)
 
     def stop(self):

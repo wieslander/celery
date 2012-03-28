@@ -7,6 +7,7 @@ if __name__ == "__main__" and __package__ is None:
 
 import sys
 
+from importlib import import_module
 from optparse import OptionParser, make_option as Option
 from pprint import pformat
 from textwrap import wrap
@@ -17,6 +18,8 @@ from .. import __version__
 from ..app import app_or_default, current_app
 from ..platforms import EX_OK, EX_FAILURE, EX_UNAVAILABLE, EX_USAGE
 from ..utils import term
+from ..utils.imports import symbol_by_name
+from ..utils.text import pluralize
 from ..utils.timeutils import maybe_iso8601
 
 from ..bin.base import Command as CeleryCommand
@@ -90,7 +93,10 @@ class Command(object):
         return OptionParser(prog=prog_name,
                             usage=self.usage(command),
                             version=self.version,
-                            option_list=self.option_list)
+                            option_list=self.get_options())
+
+    def get_options(self):
+        return self.option_list
 
     def run_from_argv(self, prog_name, argv):
         self.prog_name = prog_name
@@ -135,21 +141,57 @@ class Command(object):
         return OK, pformat(n)
 
 
+class Delegate(Command):
+
+    def __init__(self, *args, **kwargs):
+        super(Delegate, self).__init__(*args, **kwargs)
+
+        self.target = symbol_by_name(self.Command)(app=self.app)
+        self.args = self.target.args
+
+    def get_options(self):
+        return self.option_list + self.target.get_options()
+
+    def run(self, *args, **kwargs):
+        self.target.check_args(args)
+        return self.target.run(*args, **kwargs)
+
+
+def create_delegate(name, Command):
+    return command(type(name, (Delegate, ), {"Command": Command,
+                                             "__module__": __name__}))
+
+
+worker = create_delegate("worker", "celery.bin.celeryd:WorkerCommand")
+events = create_delegate("events", "celery.bin.celeryev:EvCommand")
+beat = create_delegate("beat", "celery.bin.celerybeat:BeatCommand")
+amqp = create_delegate("amqp", "celery.bin.camqadm:AMQPAdminCommand")
+
+
 class list_(Command):
-    args = "<bindings>"
+    args = "[bindings]"
 
     def list_bindings(self, channel):
+        try:
+            bindings = channel.list_bindings()
+        except NotImplementedError:
+            raise Error("Your transport cannot list bindings.")
+
         fmt = lambda q, e, r: self.out("%s %s %s" % (q.ljust(28),
                                                      e.ljust(28), r))
         fmt("Queue", "Exchange", "Routing Key")
         fmt("-" * 16, "-" * 16, "-" * 16)
-        for binding in channel.list_bindings():
+        for binding in bindings:
             fmt(*binding)
 
-    def run(self, what, *_, **kw):
+    def run(self, what=None, *_, **kw):
         topics = {"bindings": self.list_bindings}
+        available = ', '.join(topics.keys())
+        if not what:
+            raise Error("You must specify what to list (%s)" % available)
         if what not in topics:
-            raise ValueError("%r not in %r" % (what, topics.keys()))
+            raise Error("unknown topic %r (choose one of: %s)" % (
+                            what, available))
         with self.app.broker_connection() as conn:
             self.app.amqp.get_task_consumer(conn).declare()
             with conn.channel() as channel:
@@ -201,14 +243,8 @@ class apply(Command):
                                  routing_key=kw.get("routing_key"),
                                  eta=maybe_iso8601(kw.get("eta")),
                                  expires=expires)
-        self.out(res.task_id)
+        self.out(res.id)
 apply = command(apply)
-
-
-def pluralize(n, text, suffix='s'):
-    if n > 1:
-        return text + suffix
-    return text
 
 
 class purge(Command):
@@ -234,12 +270,11 @@ class result(Command):
     )
 
     def run(self, task_id, *args, **kwargs):
-        from .. import registry
         result_cls = self.app.AsyncResult
         task = kwargs.get("task")
 
         if task:
-            result_cls = registry.tasks[task].AsyncResult
+            result_cls = self.app.tasks[task].AsyncResult
         result = result_cls(task_id)
         self.out(self.prettify(result.get())[1])
 result = command(result)
@@ -258,7 +293,8 @@ class inspect(Command):
                "disable_events": 1.0,
                "ping": 0.2,
                "add_consumer": 1.0,
-               "cancel_consumer": 1.0}
+               "cancel_consumer": 1.0,
+               "report": 1.0}
     option_list = Command.option_list + (
                 Option("--timeout", "-t", type="float", dest="timeout",
                     default=None,
@@ -333,7 +369,7 @@ class status(Command):
         nodecount = len(replies)
         if not kwargs.get("quiet", False):
             self.out("\n%s %s online." % (nodecount,
-                                          nodecount > 1 and "nodes" or "node"))
+                                          pluralize(nodecount, "node")))
 status = command(status)
 
 
@@ -372,17 +408,33 @@ class shell(Command):
                 Option("--without-tasks", "-T", action="store_true",
                     dest="without_tasks", default=False,
                     help="Don't add tasks to locals."),
+                Option("--eventlet", action="store_true",
+                    dest="eventlet", default=False,
+                    help="Use eventlet."),
+                Option("--gevent", action="store_true",
+                    dest="gevent", default=False,
+                    help="Use gevent."),
     )
 
     def run(self, force_ipython=False, force_bpython=False,
-            force_python=False, without_tasks=False, **kwargs):
-        from .. import registry
+            force_python=False, without_tasks=False, eventlet=False,
+            gevent=False, **kwargs):
+        if eventlet:
+            import_module("celery.concurrency.eventlet")
+        if gevent:
+            import_module("celery.concurrency.gevent")
+        from .. import task
         self.app.loader.import_default_modules()
-        self.locals = {"celery": self.app}
+        self.locals = {"celery": self.app,
+                       "BaseTask": task.BaseTask,
+                       "TaskSet": task.TaskSet,
+                       "chord": task.chord,
+                       "group": task.group,
+                       "chain": task.chain}
 
         if not without_tasks:
             self.locals.update(dict((task.__name__, task)
-                                for task in registry.tasks.itervalues()))
+                                for task in self.app.tasks.itervalues()))
 
         if force_python:
             return self.invoke_fallback_shell()
@@ -448,8 +500,17 @@ class help(Command):
 help = command(help)
 
 
+class report(Command):
+
+    def run(self, *args, **kwargs):
+        print(self.app.bugreport())
+        return EX_OK
+report = command(report)
+
+
 class celeryctl(CeleryCommand):
     commands = commands
+    enable_config_from_cmdline = True
 
     def execute(self, command, argv=None):
         try:
@@ -464,7 +525,7 @@ class celeryctl(CeleryCommand):
 
     def remove_options_at_beginning(self, argv, index=0):
         if argv:
-            while index <= len(argv):
+            while index < len(argv):
                 value = argv[index]
                 if value.startswith("--"):
                     pass

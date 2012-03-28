@@ -13,24 +13,15 @@
 from __future__ import absolute_import
 
 import os
-import threading
 
-from .. import registry
-from ..utils import cached_property, instantiate
+from ..local import PromiseProxy
+from ..utils import cached_property
+from ..utils.imports import instantiate
 
 from . import annotations
 from . import base
-
-
-class _TLS(threading.local):
-    #: Apps with the :attr:`~celery.app.base.BaseApp.set_as_current` attribute
-    #: sets this, so it will always contain the last instantiated app,
-    #: and is the default app returned by :func:`app_or_default`.
-    current_app = None
-
-    #: The currently executing task.
-    current_task = None
-_tls = _TLS()
+from .state import _tls
+from .state import current_task  # noqa
 
 
 class AppPickler(object):
@@ -92,27 +83,14 @@ class App(base.BaseApp):
     def create_task_cls(self):
         """Creates a base task class using default configuration
         taken from this app."""
-        conf = self.conf
-
         from .task import BaseTask
 
         class Task(BaseTask):
-            abstract = True
             app = self
-            backend = self.backend
-            exchange_type = conf.CELERY_DEFAULT_EXCHANGE_TYPE
-            delivery_mode = conf.CELERY_DEFAULT_DELIVERY_MODE
-            send_error_emails = conf.CELERY_SEND_TASK_ERROR_EMAILS
-            error_whitelist = conf.CELERY_TASK_ERROR_WHITELIST
-            serializer = conf.CELERY_TASK_SERIALIZER
-            rate_limit = conf.CELERY_DEFAULT_RATE_LIMIT
-            track_started = conf.CELERY_TRACK_STARTED
-            acks_late = conf.CELERY_ACKS_LATE
-            ignore_result = conf.CELERY_IGNORE_RESULT
-            store_errors_even_if_ignored = \
-                conf.CELERY_STORE_ERRORS_EVEN_IF_IGNORED
-            accept_magic_kwargs = self.accept_magic_kwargs
+            abstract = True
+
         Task.__doc__ = BaseTask.__doc__
+        Task.bind(self)
 
         return Task
 
@@ -141,52 +119,73 @@ class App(base.BaseApp):
     def task(self, *args, **options):
         """Decorator to create a task class out of any callable.
 
-        .. admonition:: Examples
+        **Examples:**
 
-            .. code-block:: python
+        .. code-block:: python
 
-                @task()
-                def refresh_feed(url):
-                    return Feed.objects.get(url=url).refresh()
+            @task()
+            def refresh_feed(url):
+                return Feed.objects.get(url=url).refresh()
 
-            With setting extra options and using retry.
+        with setting extra options and using retry.
 
-            .. code-block:: python
+        .. code-block:: python
 
-                @task(exchange="feeds")
-                def refresh_feed(url, **kwargs):
-                    try:
-                        return Feed.objects.get(url=url).refresh()
-                    except socket.error, exc:
-                        refresh_feed.retry(args=[url], kwargs=kwargs, exc=exc)
+            from celery.task import current
 
-            Calling the resulting task:
+            @task(exchange="feeds")
+            def refresh_feed(url):
+                try:
+                return Feed.objects.get(url=url).refresh()
+            except socket.error, exc:
+                current.retry(exc=exc)
 
-                >>> refresh_feed("http://example.com/rss") # Regular
-                <Feed: http://example.com/rss>
-                >>> refresh_feed.delay("http://example.com/rss") # Async
-                <AsyncResult: 8998d0f4-da0b-4669-ba03-d5ab5ac6ad5d>
+        Calling the resulting task::
+
+            >>> refresh_feed("http://example.com/rss") # Regular
+            <Feed: http://example.com/rss>
+            >>> refresh_feed.delay("http://example.com/rss") # Async
+            <AsyncResult: 8998d0f4-da0b-4669-ba03-d5ab5ac6ad5d>
+
+        .. admonition:: App Binding
+
+            For custom apps the task decorator returns proxy
+            objects, so that the act of creating the task is not performed
+            until the task is used or the task registry is accessed.
+
+            If you are depending on binding to be deferred, then you must
+            not access any attributes on the returned object until the
+            application is fully set up (finalized).
 
         """
 
         def inner_create_task_cls(**options):
 
             def _create_task_cls(fun):
-                base = options.pop("base", None) or self.Task
+                if self.accept_magic_kwargs:  # compat mode
+                    return self._task_from_fun(fun, **options)
 
-                T = type(fun.__name__, (base, ), dict({
-                        "app": self,
-                        "accept_magic_kwargs": False,
-                        "run": staticmethod(fun),
-                        "__doc__": fun.__doc__,
-                        "__module__": fun.__module__}, **options))()
-                return registry.tasks[T.name]  # global instance.
+                # return a proxy object that is only evaluated when first used
+                promise = PromiseProxy(self._task_from_fun, (fun, ), options)
+                self._pending.append(promise)
+                return promise
 
             return _create_task_cls
 
         if len(args) == 1 and callable(args[0]):
             return inner_create_task_cls(**options)(*args)
         return inner_create_task_cls(**options)
+
+    def _task_from_fun(self, fun, **options):
+        base = options.pop("base", None) or self.Task
+
+        T = type(fun.__name__, (base, ), dict({
+                "app": self,
+                "accept_magic_kwargs": False,
+                "run": staticmethod(fun),
+                "__doc__": fun.__doc__,
+                "__module__": fun.__module__}, **options))()
+        return self._tasks[T.name]  # return global instance.
 
     def annotate_task(self, task):
         if self.annotations:
@@ -239,10 +238,6 @@ default_app = App("default", loader=default_loader,
 
 def current_app():
     return getattr(_tls, "current_app", None) or default_app
-
-
-def current_task():
-    return getattr(_tls, "current_task", None)
 
 
 def _app_or_default(app=None):

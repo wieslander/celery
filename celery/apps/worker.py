@@ -16,7 +16,10 @@ from .. import __version__, platforms, signals
 from ..app import app_or_default
 from ..app.abstract import configurated, from_config
 from ..exceptions import ImproperlyConfigured, SystemTerminate
-from ..utils import isatty, LOG_LEVELS, cry, qualname
+from ..utils import cry, isatty
+from ..utils.imports import qualname
+from ..utils.log import LOG_LEVELS, mlevel
+from ..utils.text import pluralize
 from ..worker import WorkController
 
 try:
@@ -81,10 +84,16 @@ class Worker(configurated):
             queues=None, include=None, app=None, pidfile=None,
             autoscale=None, autoreload=False, **kwargs):
         self.app = app = app_or_default(app)
+        self.hostname = hostname or socket.gethostname()
+
+        # this signal can be used to set up configuration for
+        # workers by name.
+        signals.celeryd_init.send(sender=self.hostname, instance=self,
+                                  conf=self.app.conf)
+
         self.setup_defaults(kwargs, namespace="celeryd")
         if not self.concurrency:
             self.concurrency = cpu_count()
-        self.hostname = hostname or socket.gethostname()
         self.discard = discard
         self.embed_clockservice = embed_clockservice
         if self.app.IS_WINDOWS and self.embed_clockservice:
@@ -108,14 +117,13 @@ class Worker(configurated):
         if isinstance(self.include, basestring):
             self.include = self.include.split(",")
 
-        if not isinstance(self.loglevel, int):
-            try:
-                self.loglevel = LOG_LEVELS[self.loglevel.upper()]
-            except KeyError:
-                self.die("Unknown level %r. Please use one of %s." % (
-                            self.loglevel,
-                            "|".join(l for l in LOG_LEVELS.keys()
-                                        if isinstance(l, basestring))))
+        try:
+            self.loglevel = mlevel(self.loglevel)
+        except KeyError:
+            self.die("Unknown level %r. Please use one of %s." % (
+                        self.loglevel,
+                        "|".join(l for l in LOG_LEVELS.keys()
+                                    if isinstance(l, basestring))))
 
     def run(self):
         self.init_loader()
@@ -165,8 +173,8 @@ class Worker(configurated):
 
     def purge_messages(self):
         count = self.app.control.discard_all()
-        what = (not count or count > 1) and "messages" or "message"
-        print("discard: Erased %d %s from the queue.\n" % (count, what))
+        print("discard: Erased %d %s from the queue.\n" % (
+                count, pluralize(count, "message")))
 
     def worker_init(self):
         # Run the worker init handler.
@@ -174,8 +182,7 @@ class Worker(configurated):
         self.loader.init_worker()
 
     def tasklist(self, include_builtins=True):
-        from ..registry import tasks
-        tasklist = tasks.keys()
+        tasklist = self.app.tasks.keys()
         if not include_builtins:
             tasklist = filter(lambda s: not s.startswith("celery."),
                               tasklist)
@@ -219,6 +226,7 @@ class Worker(configurated):
                                     autoreload=self.autoreload,
                                     **self.confopts_as_dict())
         self.install_platform_tweaks(worker)
+        signals.worker_init.send(sender=worker)
         worker.start()
 
     def install_platform_tweaks(self, worker):
@@ -242,7 +250,6 @@ class Worker(configurated):
         install_worker_int_handler(worker)
         install_cry_handler(worker.logger)
         install_rdb_handler()
-        signals.worker_init.send(sender=worker)
 
     def osx_proxy_detection_workaround(self):
         """See http://github.com/ask/celery/issues#issue/161"""

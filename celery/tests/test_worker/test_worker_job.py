@@ -11,9 +11,11 @@ import time
 from datetime import datetime, timedelta
 
 from kombu.transport.base import Message
+from kombu.utils.encoding import from_utf8, default_encode
 from mock import Mock
 from nose import SkipTest
 
+from celery import current_app
 from celery import states
 from celery.app import app_or_default
 from celery.concurrency.base import BasePool
@@ -22,12 +24,10 @@ from celery.exceptions import (RetryTaskError,
                                WorkerLostError, InvalidTaskError)
 from celery.execute.trace import eager_trace_task, TraceInfo
 from celery.log import setup_logger
-from celery.registry import tasks
 from celery.result import AsyncResult
 from celery.task import task as task_dec
 from celery.task.base import Task
 from celery.utils import uuid
-from celery.utils.encoding import from_utf8, default_encode
 from celery.worker.job import Request, TaskRequest, execute_and_trace
 from celery.worker.state import revoked
 
@@ -39,7 +39,8 @@ some_kwargs_scratchpad = {}
 
 
 def jail(task_id, name, args, kwargs):
-    return eager_trace_task(tasks[name], task_id, args, kwargs, eager=False)[0]
+    return eager_trace_task(current_app.tasks[name],
+                            task_id, args, kwargs, eager=False)[0]
 
 
 def on_ack(*args, **kwargs):
@@ -256,16 +257,16 @@ class test_TaskRequest(Case):
         tw = TaskRequest(mytask.name, uuid(), [1], {"f": "x"},
                          expires=datetime.utcnow() - timedelta(days=1))
         tw.revoked()
-        self.assertIn(tw.task_id, revoked)
-        self.assertEqual(mytask.backend.get_status(tw.task_id),
+        self.assertIn(tw.id, revoked)
+        self.assertEqual(mytask.backend.get_status(tw.id),
                          states.REVOKED)
 
     def test_revoked_expires_not_expired(self):
         tw = TaskRequest(mytask.name, uuid(), [1], {"f": "x"},
                          expires=datetime.utcnow() + timedelta(days=1))
         tw.revoked()
-        self.assertNotIn(tw.task_id, revoked)
-        self.assertNotEqual(mytask.backend.get_status(tw.task_id),
+        self.assertNotIn(tw.id, revoked)
+        self.assertNotEqual(mytask.backend.get_status(tw.id),
                          states.REVOKED)
 
     def test_revoked_expires_ignore_result(self):
@@ -274,8 +275,8 @@ class test_TaskRequest(Case):
                          expires=datetime.utcnow() - timedelta(days=1))
         try:
             tw.revoked()
-            self.assertIn(tw.task_id, revoked)
-            self.assertNotEqual(mytask.backend.get_status(tw.task_id),
+            self.assertIn(tw.id, revoked)
+            self.assertNotEqual(mytask.backend.get_status(tw.id),
                                 states.REVOKED)
 
         finally:
@@ -337,14 +338,14 @@ class test_TaskRequest(Case):
 
     def test_revoked(self):
         tw = TaskRequest(mytask.name, uuid(), [1], {"f": "x"})
-        revoked.add(tw.task_id)
+        revoked.add(tw.id)
         self.assertTrue(tw.revoked())
         self.assertTrue(tw._already_revoked)
         self.assertTrue(tw.acknowledged)
 
     def test_execute_does_not_execute_revoked(self):
         tw = TaskRequest(mytask.name, uuid(), [1], {"f": "x"})
-        revoked.add(tw.task_id)
+        revoked.add(tw.id)
         tw.execute()
 
     def test_execute_acks_late(self):
@@ -358,7 +359,7 @@ class test_TaskRequest(Case):
 
     def test_execute_using_pool_does_not_execute_revoked(self):
         tw = TaskRequest(mytask.name, uuid(), [1], {"f": "x"})
-        revoked.add(tw.task_id)
+        revoked.add(tw.id)
         tw.execute_using_pool(None)
 
     def test_on_accepted_acks_early(self):
@@ -410,7 +411,7 @@ class test_TaskRequest(Case):
         tw = TaskRequest(mytask.name, uuid(), [1], {"f": "x"})
         exc_info = get_ei()
         tw.on_failure(exc_info)
-        self.assertEqual(mytask.backend.get_status(tw.task_id),
+        self.assertEqual(mytask.backend.get_status(tw.id),
                          states.FAILURE)
 
         mytask.ignore_result = True
@@ -418,7 +419,7 @@ class test_TaskRequest(Case):
             exc_info = get_ei()
             tw = TaskRequest(mytask.name, uuid(), [1], {"f": "x"})
             tw.on_failure(exc_info)
-            self.assertEqual(mytask.backend.get_status(tw.task_id),
+            self.assertEqual(mytask.backend.get_status(tw.id),
                              states.PENDING)
         finally:
             mytask.ignore_result = False
@@ -463,7 +464,7 @@ class test_TaskRequest(Case):
                       tw.logger.warnings[0])
         tw.on_timeout(soft=False, timeout=1337)
         self.assertIn("Hard time limit (1337s) exceeded", tw.logger.errors[0])
-        self.assertEqual(mytask.backend.get_status(tw.task_id),
+        self.assertEqual(mytask.backend.get_status(tw.id),
                          states.FAILURE)
 
         mytask.ignore_result = True
@@ -472,7 +473,7 @@ class test_TaskRequest(Case):
             tw.logger = MockLogger()
         finally:
             tw.on_timeout(soft=True, timeout=1336)
-            self.assertEqual(mytask.backend.get_status(tw.task_id),
+            self.assertEqual(mytask.backend.get_status(tw.id),
                              states.PENDING)
             mytask.ignore_result = False
 
@@ -533,13 +534,13 @@ class test_TaskRequest(Case):
 
     def test_task_wrapper_mail_attrs(self):
         tw = TaskRequest(mytask.name, uuid(), [], {})
-        x = tw.success_msg % {"name": tw.task_name,
-                              "id": tw.task_id,
+        x = tw.success_msg % {"name": tw.name,
+                              "id": tw.id,
                               "return_value": 10,
                               "runtime": 0.3641}
         self.assertTrue(x)
-        x = tw.error_msg % {"name": tw.task_name,
-                           "id": tw.task_id,
+        x = tw.error_msg % {"name": tw.name,
+                           "id": tw.id,
                            "exc": "FOOBARBAZ",
                            "traceback": "foobarbaz"}
         self.assertTrue(x)
@@ -553,8 +554,8 @@ class test_TaskRequest(Case):
                           content_encoding="utf-8")
         tw = TaskRequest.from_message(m, m.decode())
         self.assertIsInstance(tw, Request)
-        self.assertEqual(tw.task_name, body["task"])
-        self.assertEqual(tw.task_id, body["id"])
+        self.assertEqual(tw.name, body["task"])
+        self.assertEqual(tw.id, body["id"])
         self.assertEqual(tw.args, body["args"])
         us = from_utf8(us)
         if sys.version_info < (2, 6):
@@ -667,11 +668,11 @@ class test_TaskRequest(Case):
                     "f": "x",
                     "logfile": "some_logfile",
                     "loglevel": 10,
-                    "task_id": tw.task_id,
+                    "task_id": tw.id,
                     "task_retries": 0,
                     "task_is_eager": False,
                     "delivery_info": {"exchange": None, "routing_key": None},
-                    "task_name": tw.task_name})
+                    "task_name": tw.name})
 
     def _test_on_failure(self, exception):
         app = app_or_default()
