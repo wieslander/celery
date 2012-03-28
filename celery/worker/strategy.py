@@ -6,7 +6,7 @@ from .job import Request
 def default(task, app, consumer):
     logger = consumer.logger
     hostname = consumer.hostname
-    eventer = consumer.event_dispatcher
+    eventer = consumer.eventer
     Req = Request
     handle = consumer.on_task
     connection_errors = consumer.connection_errors

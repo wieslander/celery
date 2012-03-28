@@ -12,7 +12,26 @@
 """
 from __future__ import absolute_import
 
+from .. import abstract
+
 from .state import SOFTWARE_INFO
+
+
+class Component(abstract.StartStopComponent):
+    name = "consumer.heartbeat"
+    requires = ("events", )
+    heart = None
+
+    def create(self, c):
+        return self
+
+    def start(self, c):
+        self.heart = Heart(c.priority_timer, c.event_dispatcher)
+        self.heart.start()
+
+    def stop(self, c):
+        if self.heart:
+            self.heart.stop()
 
 
 class Heart(object):

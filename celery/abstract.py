@@ -78,6 +78,8 @@ class Namespace(object):
         """Bind component to parent object and this namespace."""
         comp = self[name](parent, **kwargs)
         comp.namespace = self
+        comp.logger = self.logger
+        comp.app = self.app
         return comp
 
     def import_module(self, module):
@@ -168,6 +170,12 @@ class Component(object):
 
     #: This provides the default for :meth:`include_if`.
     enabled = True
+
+    #: The current app (set by namespace when bound)
+    app = None
+
+    #: Logger (set by namespace when bound)
+    logger = None
 
     def __init__(self, parent, **kwargs):
         pass
