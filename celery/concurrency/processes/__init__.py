@@ -48,6 +48,10 @@ def process_initializer(app, hostname):
     app.loader.init_worker()
     app.loader.init_worker_process()
     app.finalize()
+    from celery.task.trace import build_tracer
+    for name, task in app.tasks.iteritems():
+        task.__tracer__ = build_tracer(name, task, app.loader, hostname)
+
     signals.worker_process_init.send(sender=None)
 
 
@@ -67,7 +71,7 @@ class TaskPool(BasePool):
         self._pool = self.Pool(processes=self.limit,
                                initializer=process_initializer,
                                **self.options)
-        self.on_apply = self._pool.apply_async
+        self.apply_async = self._pool.apply_async
 
     def did_start_ok(self):
         return self._pool.did_start_ok()

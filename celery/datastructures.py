@@ -386,12 +386,13 @@ class LimitedSet(object):
     :keyword expires: Time in seconds, before a membership expires.
 
     """
-    __slots__ = ("maxlen", "expires", "_data")
+    __slots__ = ("maxlen", "expires", "_data", "__len__")
 
     def __init__(self, maxlen=None, expires=None):
         self.maxlen = maxlen
         self.expires = expires
         self._data = {}
+        self.__len__ = self._data.__len__
 
     def add(self, value):
         """Add a new member."""
@@ -433,9 +434,6 @@ class LimitedSet(object):
 
     def __iter__(self):
         return iter(self._data.keys())
-
-    def __len__(self):
-        return len(self._data.keys())
 
     def __repr__(self):
         return "LimitedSet(%r)" % (self._data.keys(), )

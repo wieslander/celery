@@ -11,7 +11,7 @@ class TaskPool(BasePool):
 
     def __init__(self, *args, **kwargs):
         super(TaskPool, self).__init__(*args, **kwargs)
-        self.on_apply = apply_target
+        self.apply_async = apply_target
 
     def _get_info(self):
         return {"max-concurrency": 1,

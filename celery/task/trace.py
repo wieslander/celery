@@ -21,7 +21,9 @@ from __future__ import absolute_import
 import os
 import socket
 import sys
+import logging
 
+from time import time
 from warnings import warn
 
 from kombu.utils import kwdict
@@ -33,21 +35,23 @@ from celery.app.task import BaseTask, Context
 from celery.datastructures import ExceptionInfo
 from celery.exceptions import RetryTaskError
 from celery.utils.serialization import get_pickleable_exception
+from celery.utils.encoding import safe_repr
 from celery.utils.log import get_logger
+from celery.utils.text import truncate
 
-_logger = get_logger(__name__)
-
-send_prerun = signals.task_prerun.send
-prerun_receivers = signals.task_prerun.receivers
-send_postrun = signals.task_postrun.send
-postrun_receivers = signals.task_postrun.receivers
-send_success = signals.task_success.send
-success_receivers = signals.task_success.receivers
 STARTED = states.STARTED
 SUCCESS = states.SUCCESS
 RETRY = states.RETRY
 FAILURE = states.FAILURE
 EXCEPTION_STATES = states.EXCEPTION_STATES
+
+_logger = get_logger(__name__)
+info = _logger.info
+
+#: Format string used to log task success.
+success_msg = """\
+    Task %(name)s[%(id)s] succeeded in %(runtime)ss: %(return_value)s
+""".strip()
 
 
 def mro_lookup(cls, attr, stop=()):
@@ -69,6 +73,12 @@ def task_has_custom(task, attr):
     """Returns true if the task or one of its bases
     defines ``attr`` (excluding the one in BaseTask)."""
     return mro_lookup(task.__class__, attr, stop=(BaseTask, object))
+
+
+def repr_result(result, maxlen=46):
+    # 46 is the length needed to fit
+    #     "the quick brown fox jumps over the lazy dog" :)
+    return truncate(safe_repr(result), maxlen)
 
 
 class TraceInfo(object):
@@ -153,11 +163,24 @@ def execute_bare(task, uuid, args, kwargs, request=None, Info=TraceInfo):
 
 
 def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
-        Info=TraceInfo, eager=False, propagate=False):
+        Info=TraceInfo, eager=False, propagate=False, kwdict=kwdict, time=time):
     # If the task doesn't define a custom __call__ method
     # we optimize it away by simply calling the run method directly,
     # saving the extra method call and a line less in the stack trace.
     fun = task if task_has_custom(task, "__call__") else task.run
+    prerun_receivers = signals.task_prerun.receivers
+    send_prerun = signals.task_prerun.send if prerun_receivers else None
+
+    postrun_receivers = signals.task_postrun.receivers
+    send_postrun = signals.task_postrun.send if postrun_receivers else None
+    success_receivers = signals.task_success.receivers
+    send_success = signals.task_success.send if success_receivers else None
+    STARTED = states.STARTED
+    SUCCESS = states.SUCCESS
+    RETRY = states.RETRY
+    FAILURE = states.FAILURE
+    EXCEPTION_STATES = states.EXCEPTION_STATES
+    _does_info = _logger.isEnabledFor(logging.INFO)
 
     loader = loader or current_app.loader
     backend = task.backend
@@ -187,104 +210,101 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
     pop_request = request_stack.pop
     on_chord_part_return = backend.on_chord_part_return
 
+    push_current = _task_stack.push
+    pop_current = _task_stack.pop
+
     from celery import canvas
     subtask = canvas.subtask
 
-    def trace_task(uuid, args, kwargs, request=None):
+    def trace_task(uuid, args, kwargs, request=None, kwdict=kwdict, time=time):
         R = I = None
         kwargs = kwdict(kwargs)
+        push_current(task)
+        push_request(request)
+        # -*- PRE -*-
+        if send_prerun:
+            send_prerun(sender=task, task_id=uuid, task=task,
+                        args=args, kwargs=kwargs)
+        loader_task_init(uuid, task)
+        if track_started:
+            store_result(uuid, {"pid": pid,
+                               "hostname": hostname}, STARTED)
+
+        # -*- TRACE -*-
         try:
-            _task_stack.push(task)
-            task_request = Context(request or {}, args=args,
-                                   called_directly=False, kwargs=kwargs)
-            push_request(task_request)
-            try:
-                # -*- PRE -*-
-                if prerun_receivers:
-                    send_prerun(sender=task, task_id=uuid, task=task,
-                                args=args, kwargs=kwargs)
-                loader_task_init(uuid, task)
-                if track_started:
-                    store_result(uuid, {"pid": pid,
-                                        "hostname": hostname}, STARTED)
-
-                # -*- TRACE -*-
-                try:
-                    R = retval = fun(*args, **kwargs)
-                    state = SUCCESS
-                except RetryTaskError, exc:
-                    I = Info(RETRY, exc)
-                    state, retval = I.state, I.retval
-                    R = I.handle_error_state(task, eager=eager)
-                except Exception, exc:
-                    if propagate:
-                        raise
-                    I = Info(FAILURE, exc)
-                    state, retval = I.state, I.retval
-                    R = I.handle_error_state(task, eager=eager)
-                    [subtask(errback).apply_async((uuid, ))
-                        for errback in task_request.errbacks or []]
-                except BaseException, exc:
-                    raise
-                except:  # pragma: no cover
-                    # For Python2.5 where raising strings are still allowed
-                    # (but deprecated)
-                    if propagate:
-                        raise
-                    I = Info(FAILURE, None)
-                    state, retval = I.state, I.retval
-                    R = I.handle_error_state(task, eager=eager)
-                    [subtask(errback).apply_async((uuid, ))
-                        for errback in task_request.errbacks or []]
-                else:
-                    if publish_result:
-                        store_result(uuid, retval, SUCCESS)
-                    # callback tasks must be applied before the result is
-                    # stored, so that result.children is populated.
-                    [subtask(callback).apply_async((retval, ))
-                        for callback in task_request.callbacks or []]
-                    if task_on_success:
-                        task_on_success(retval, uuid, args, kwargs)
-                    if success_receivers:
-                        send_success(sender=task, result=retval)
-
-                # -* POST *-
-                if task_request.chord:
-                    on_chord_part_return(task)
-                if task_after_return:
-                    task_after_return(state, retval, uuid, args, kwargs, None)
-                if postrun_receivers:
-                    send_postrun(sender=task, task_id=uuid, task=task,
-                                 args=args, kwargs=kwargs,
-                                 retval=retval, state=state)
-            finally:
-                _task_stack.pop()
-                pop_request()
-                if not eager:
-                    try:
-                        backend_cleanup()
-                        loader_cleanup()
-                    except (KeyboardInterrupt, SystemExit, MemoryError):
-                        raise
-                    except Exception, exc:
-                        _logger.error("Process cleanup failed: %r", exc,
-                                      exc_info=True)
+            time_start = time()
+            R = fun(*args, **kwargs)
+            state = SUCCESS
+            if publish_result:
+                store_result(uuid, R, SUCCESS)
+            # callback tasks must be applied before the result is
+            # stored, so that result.children is populated.
+            [subtask(callback).apply_async((R, ))
+                for callback in request.callbacks or ()]
+            if task_on_success:
+                task_on_success(R, uuid, args, kwargs)
+            if send_success:
+                send_success(sender=task, result=R)
+            if _does_info:
+                info(success_msg, {
+                    "id": uuid, "name": name,
+                    "return_value": repr_result(R),
+                    "runtime": time() - time_start})
+        except RetryTaskError, exc:
+            I = Info(RETRY, exc)
+            state, R = I.state, I.retval
+            R = I.handle_error_state(task, eager=eager)
         except Exception, exc:
-            if eager:
+            if propagate:
                 raise
-            R = report_internal_error(task, exc)
+            I = Info(FAILURE, exc)
+            state, R = I.state, I.retval
+            R = I.handle_error_state(task, eager=eager)
+            [subtask(errback).apply_async((uuid, ))
+                for errback in request.errbacks or []]
+        except BaseException, exc:
+            raise
+        finally:
+            # -* POST *-
+            if request.chord:
+                on_chord_part_return(task)
+            if task_after_return:
+                task_after_return(state, R, uuid, args, kwargs, None)
+            if send_postrun:
+                send_postrun(sender=task, task_id=uuid, task=task,
+                                args=args, kwargs=kwargs,
+                                retval=R, state=state)
+            pop_current()
+            pop_request()
+            if not eager:
+                try:
+                    backend_cleanup()
+                    loader_cleanup()
+                except (KeyboardInterrupt, SystemExit, MemoryError):
+                    raise
+                except Exception, exc:
+                    _logger.error("Process cleanup failed: %r", exc,
+                                    exc_info=True)
         return R, I
 
     return trace_task
 
 
-def trace_task(task, uuid, args, kwargs, request=None, **opts):
+def trace_task(task, uuid, args, kwargs, request=None,
+        build_tracer=build_tracer, **opts):
     try:
         if task.__tracer__ is None:
             task.__tracer__ = build_tracer(task.name, task, **opts)
         return task.__tracer__(uuid, args, kwargs, request)
     except Exception, exc:
         return report_internal_error(task, exc), None
+
+
+def trace_task_ret(task, uuid, args, kwargs, request):
+    try:
+        task.__tracer__(uuid, args, kwargs, request)
+    except Exception, exc:
+        return report_internal_error(task, exc)
 
 
 def eager_trace_task(task, uuid, args, kwargs, request=None, **opts):

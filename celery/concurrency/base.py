@@ -12,11 +12,13 @@ from celery.utils.log import get_logger
 
 logger = get_logger("celery.concurrency")
 
+_pid = None
+
 
 def apply_target(target, args=(), kwargs={}, callback=None,
         accept_callback=None, pid=None, **_):
     if accept_callback:
-        accept_callback(pid or os.getpid(), time.time())
+        accept_callback(pid)
     callback(target(*args, **kwargs))
 
 
@@ -116,13 +118,7 @@ class BasePool(object):
         otherwise the thread which handles the result will get blocked.
 
         """
-        if self._does_debug:
-            logger.debug("TaskPool: Apply %s (args:%s kwargs:%s)",
-                         target, safe_repr(args), safe_repr(kwargs))
-
-        return self.on_apply(target, args, kwargs,
-                             waitforslot=self.putlocks,
-                             **options)
+        raise NotImplementedError("apply_async")
 
     def _get_info(self):
         return {}

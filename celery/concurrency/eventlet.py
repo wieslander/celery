@@ -17,8 +17,9 @@ from . import base
 
 
 def apply_target(target, args=(), kwargs={}, callback=None,
-                 accept_callback=None, getpid=None):
-    return base.apply_target(target, args, kwargs, callback, accept_callback,
+                 accept_callback=None, getpid=None,
+                 apply=base.apply_target):
+    return apply(target, args, kwargs, callback, accept_callback,
                              pid=getpid())
 
 
@@ -105,6 +106,8 @@ class TaskPool(base.BasePool):
 
     def on_start(self):
         self._pool = self.Pool(self.limit)
+        self._quick_put = self._pool.spawn_n
+        self._quick_send_applysig = signals.eventlet_pool_apply.send
         signals.eventlet_pool_started.send(sender=self)
 
     def on_stop(self):
@@ -113,10 +116,10 @@ class TaskPool(base.BasePool):
             self._pool.waitall()
         signals.eventlet_pool_postshutdown.send(sender=self)
 
-    def on_apply(self, target, args=None, kwargs=None, callback=None,
+    def apply_async(self, target, args=(), kwargs={}, callback=None,
             accept_callback=None, **_):
-        signals.eventlet_pool_apply.send(sender=self,
+        self._quick_send_applysig(sender=self,
                 target=target, args=args, kwargs=kwargs)
-        self._pool.spawn_n(apply_target, target, args, kwargs,
-                           callback, accept_callback,
-                           self.getpid)
+        self._quick_put(apply_target, target, args, kwargs,
+                        callback, accept_callback,
+                        self.getpid)

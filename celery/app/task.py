@@ -22,9 +22,8 @@ from celery import current_app
 from celery import states
 from celery.__compat__ import class_property
 from celery.state import get_current_task
-from celery.datastructures import ExceptionInfo
+from celery.datastructures import AttributeDict, ExceptionInfo
 from celery.exceptions import MaxRetriesExceededError, RetryTaskError
-from celery.local import LocalStack
 from celery.result import EagerResult
 from celery.utils import fun_takes_kwargs, uuid, maybe_reraise
 from celery.utils.functional import mattrgetter, maybe_list
@@ -44,6 +43,10 @@ extract_exec_options = mattrgetter("queue", "routing_key",
 
 
 class Context(object):
+    __slots__ = ("logfile", "loglevel", "hostname",
+                 "id", "args", "kwargs", "retries", "is_eager",
+                 "delivery_info", "taskset", "chord", "called_directly",
+                 "callbacks", "errbacks", "children", "__dict__")
     # Default context
     logfile = None
     loglevel = None
@@ -59,32 +62,24 @@ class Context(object):
     called_directly = True
     callbacks = None
     errbacks = None
-    _children = None   # see property
+    children = None   # see property
 
     def __init__(self, *args, **kwargs):
-        self.update(*args, **kwargs)
-
-    def update(self, *args, **kwargs):
-        self.__dict__.update(*args, **kwargs)
-
-    def clear(self):
-        self.__dict__.clear()
-
-    def get(self, key, default=None):
-        try:
-            return getattr(self, key)
-        except AttributeError:
-            return default
+        up = self.update = self.__dict__.update
+        self.clear = self.__dict__.clear
+        self.get = self.__dict__.get
+        up(*args, children=[], **kwargs)
 
     def __repr__(self):
-        return "<Context: %r>" % (vars(self, ))
+        return repr(self._vars())
 
-    @property
-    def children(self):
-        # children must be an empy list for every thread
-        if self._children is None:
-            self._children = []
-        return self._children
+    def __reduce__(self):
+        return self.__class__, (self._vars(), )
+
+    def _vars(self):
+        return dict((k, v) for k, v in vars(self).iteritems()
+                                if k not in ("clear", "get", "update"))
+
 
 
 class TaskType(type):
@@ -176,7 +171,7 @@ class BaseTask(object):
 
     #: If disabled the worker will not forward magic keyword arguments.
     #: Deprecated and scheduled for removal in v3.0.
-    accept_magic_kwargs = False
+    accept_magic_kwargs = None
 
     #: Destination queue.  The queue needs to exist
     #: in :setting:`CELERY_QUEUES`.  The `routing_key`, `exchange` and
@@ -317,7 +312,6 @@ class BaseTask(object):
         for attr_name, config_name in self.from_config:
             if getattr(self, attr_name, None) is None:
                 setattr(self, attr_name, conf[config_name])
-        self.accept_magic_kwargs = app.accept_magic_kwargs
         if self.accept_magic_kwargs is None:
             self.accept_magic_kwargs = app.accept_magic_kwargs
         if self.backend is None:
@@ -327,6 +321,7 @@ class BaseTask(object):
         if not was_bound:
             self.annotate()
 
+        from celery.utils.threads import LocalStack
         self.request_stack = LocalStack()
         self.request_stack.push(Context())
 
@@ -696,12 +691,16 @@ class BaseTask(object):
         # Make sure we get the task instance, not class.
         task = app._tasks[self.name]
 
-        request = {"id": task_id,
-                   "retries": retries,
-                   "is_eager": True,
-                   "logfile": options.get("logfile"),
-                   "loglevel": options.get("loglevel", 0),
-                   "delivery_info": {"is_eager": True}}
+        request = AttributeDict({"id": task_id,
+                                "retries": retries,
+                                "is_eager": True,
+                                "logfile": options.get("logfile"),
+                                "loglevel": options.get("loglevel", 0),
+                                "delivery_info": {"is_eager": True},
+                                "callbacks": [],
+                                "errbacks": [],
+                                "chord": None,
+                                "called_directly": True})
         if self.accept_magic_kwargs:
             default_kwargs = {"task_name": task.name,
                               "task_id": task_id,
@@ -851,19 +850,6 @@ class BaseTask(object):
     def send_error_email(self, context, exc, **kwargs):
         if self.send_error_emails and not self.disable_error_emails:
             self.ErrorMail(self, **kwargs).send(context, exc)
-
-    def execute(self, request, pool, loglevel, logfile, **kwargs):
-        """The method the worker calls to execute the task.
-
-        :param request: A :class:`~celery.worker.job.Request`.
-        :param pool: A task pool.
-        :param loglevel: Current loglevel.
-        :param logfile: Name of the currently used logfile.
-
-        :keyword consumer: The :class:`~celery.worker.consumer.Consumer`.
-
-        """
-        request.execute_using_pool(pool, loglevel, logfile)
 
     def push_request(self, *args, **kwargs):
         self.request_stack.push(Context(*args, **kwargs))

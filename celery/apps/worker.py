@@ -19,8 +19,12 @@ from celery.utils import cry, isatty
 from celery.utils.imports import qualname
 from celery.utils.log import LOG_LEVELS, get_logger, mlevel, set_in_sighandler
 from celery.utils.text import pluralize
-from celery.utils.threads import active_count as active_thread_count
 from celery.worker import WorkController
+
+def active_thread_count():
+    from threading import enumerate
+    return sum(1 for t in enumerate()
+            if not t.name.startswith("Dummy-"))
 
 try:
     from greenlet import GreenletExit
@@ -243,6 +247,9 @@ def _shutdown_handler(worker, sig="TERM", how="Warm", exc=SystemExit,
                     callback(worker)
                 safe_say("celeryd: %s shutdown (MainProcess)" % how)
             if active_thread_count() > 1:
+                print("SET SHOULD STOP")
+                import threading
+                print("THREADS: %r" % (list(threading.enumerate(), )))
                 setattr(state, {"Warm": "should_stop",
                                 "Cold": "should_terminate"}[how], True)
             else:
