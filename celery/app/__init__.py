@@ -8,6 +8,9 @@
 """
 from __future__ import absolute_import
 from __future__ import with_statement
+print("LOADING APP")
+import traceback
+traceback.print_stack()
 
 import os
 
@@ -19,6 +22,7 @@ from celery._state import (  # noqa
         get_current_task as current_task,
         _get_active_apps,
 )
+from celery.django import _in_django
 from celery.utils import gen_task_name
 
 from .builtins import shared_task as _shared_task
@@ -35,7 +39,10 @@ default_app = Proxy(lambda: _state.default_app)
 app_or_default = None
 
 #: The 'default' loader is the default loader used by old applications.
-default_loader = os.environ.get('CELERY_LOADER') or 'default'
+default_loader = os.environ.get('CELERY_LOADER')
+if not default_loader:
+    default_loader = 'django' if _in_django() else 'default'
+
 
 #: Global fallback app instance.
 set_default_app(Celery('default', loader=default_loader,
