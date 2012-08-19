@@ -15,13 +15,16 @@ from __future__ import absolute_import
 # but in the end it only resulted in bad performance and horrible tracebacks,
 # so instead we now use one closure per task class.
 
+import logging
 import os
 import socket
 import sys
 
+from time import time
 from warnings import warn
 
 from kombu.utils import kwdict
+from kombu.utils.encoding import safe_repr, safe_str
 
 from celery import current_app
 from celery import states, signals
@@ -29,10 +32,29 @@ from celery._state import _task_stack, default_app
 from celery.app.task import Task as BaseTask, Context
 from celery.datastructures import ExceptionInfo
 from celery.exceptions import RetryTaskError
-from celery.utils.serialization import get_pickleable_exception
 from celery.utils.log import get_logger
+from celery.utils.serialization import (
+    get_pickleable_exception, get_pickled_exception
+)
+from celery.utils.text import truncate
 
-_logger = get_logger(__name__)
+#: Format string used to log task success.
+LOG_SUCCESS = """\
+Task %(name)s[%(id)s] succeeded in %(runtime)ss: %(return_value)s\
+"""
+
+#: Format string used to log task failure.
+LOG_ERROR = 'Task %(name)s[%(id)s] raised exception: %(exc)s'
+
+#: Format string used to log internal error.
+LOG_INTERNAL_ERROR = 'Task %(name)s[%(id)s] INTERNAL ERROR: %(exc)s'
+
+#: Format string used to log task retry.
+LOG_RETRY = 'Task %(name)s[%(id)s] retry: %(exc)s'
+
+
+logger = get_logger(__name__)
+info = logger.info
 
 send_prerun = signals.task_prerun.send
 prerun_receivers = signals.task_prerun.receivers
@@ -103,6 +125,10 @@ class TraceInfo(object):
             if store_errors:
                 task.backend.mark_as_retry(req.id, pred.exc, einfo.traceback)
             task.on_retry(pred.exc, req.id, req.args, req.kwargs, einfo)
+            if _does_info:
+                info(LOG_RETRY, {
+                    'id': req.id, 'name': task.name,
+                    'exc': safe_repr(pred.exc)})
             return einfo
         finally:
             del(tb)
@@ -122,13 +148,57 @@ class TraceInfo(object):
                                       kwargs=req.kwargs,
                                       traceback=einfo.traceback,
                                       einfo=einfo)
+            self._log_error(task, einfo)
             return einfo
         finally:
             del(tb)
 
+    def _log_error(self, task, einfo):
+        req = task.request
+        einfo.exception = get_pickled_exception(einfo.exception)
+        exception, traceback, exc_info, internal, sargs, skwargs = (
+            safe_repr(einfo.exception),
+            safe_str(einfo.traceback),
+            einfo.exc_info,
+            einfo.internal,
+            safe_repr(req.args),
+            safe_repr(req.kwargs),
+        )
+        format = LOG_ERROR
+        description = 'raised exception'
+        severity = logging.ERROR
+
+        if internal:
+            format = LOG_INTERNAL_ERROR
+            description = 'INTERNAL ERROR'
+            severity = logging.CRITICAL
+
+        context = {
+            'hostname': req.hostname,
+            'id': req.id,
+            'name': task.name,
+            'exc': exception,
+            'traceback': traceback,
+            'args': sargs,
+            'kwargs': skwargs,
+            'description': description,
+        }
+
+        logger.log(severity, format.strip(), context,
+                   exc_info=True,
+                   extra={'data': {'id': req.id,
+                                   'name': task.name,
+                                   'args': sargs,
+                                   'kwargs': skwargs,
+                                   'hostname': req.hostname,
+                                   'internal': internal}})
+
+        task.send_error_email(context, einfo.exception)
+
 
 def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
-        Info=TraceInfo, eager=False, propagate=False):
+        Info=TraceInfo, eager=False, propagate=False, time=time,
+        truncate=truncate):
     """Builts a function that tracing the tasks execution; catches all
     exceptions, and saves the state and result of the task execution
     to the result backend.
@@ -185,13 +255,15 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
     push_task = _task_stack.push
     pop_task = _task_stack.pop
     on_chord_part_return = backend.on_chord_part_return
+    _does_info = logger.isEnabledFor(logging.INFO)
 
     from celery import canvas
     subtask = canvas.subtask
 
     def trace_task(uuid, args, kwargs, request=None):
-        R = I = None
+        R = I = T = Rstr = None
         kwargs = kwdict(kwargs)
+        time_start = time()
         try:
             push_task(task)
             task_request = Context(request or {}, args=args,
@@ -236,6 +308,15 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                         task_on_success(retval, uuid, args, kwargs)
                     if success_receivers:
                         send_success(sender=task, result=retval)
+                    if _does_info:
+                        T = time() - time_start
+                        Rstr = truncate(safe_repr(R), 256)
+                        # 46 is the length needed to fit
+                        #     'the quick brown fox jumps over the lazy dog' :)
+                        info(LOG_SUCCESS, {
+                            'id': uuid, 'name': name,
+                            'return_value': truncate(Rstr, 46),
+                            'runtime': T})
 
                 # -* POST *-
                 if task_request.chord:
@@ -256,13 +337,13 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                     except (KeyboardInterrupt, SystemExit, MemoryError):
                         raise
                     except Exception as exc:
-                        _logger.error('Process cleanup failed: %r', exc,
-                                      exc_info=True)
+                        logger.error('Process cleanup failed: %r', exc,
+                                     exc_info=True)
         except Exception as exc:
             if eager:
                 raise
             R = report_internal_error(task, exc)
-        return R, I
+        return R, I, T, Rstr
 
     return trace_task
 
@@ -277,7 +358,8 @@ def trace_task(task, uuid, args, kwargs, request={}, **opts):
 
 
 def trace_task_ret(task, uuid, args, kwargs, request={}):
-    return _tasks[task].__trace__(uuid, args, kwargs, request)[0]
+    R, I, T, Rstr = _tasks[task].__trace__(uuid, args, kwargs, request)
+    return R if I else Rstr, T
 
 
 def eager_trace_task(task, uuid, args, kwargs, request=None, **opts):

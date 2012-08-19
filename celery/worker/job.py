@@ -10,7 +10,6 @@
 from __future__ import absolute_import
 
 import logging
-import time
 import socket
 import sys
 
@@ -33,7 +32,6 @@ from celery.utils import fun_takes_kwargs
 from celery.utils.functional import noop
 from celery.utils.log import get_logger
 from celery.utils.serialization import get_pickled_exception
-from celery.utils.text import truncate
 from celery.utils.timeutils import maybe_iso8601, timezone
 
 from . import state
@@ -59,31 +57,13 @@ NEEDS_KWDICT = sys.version_info <= (2, 6)
 
 class Request(object):
     """A request for task execution."""
-    __slots__ = ('app', 'name', 'id', 'args', 'kwargs',
-                 'on_ack', 'delivery_info', 'hostname',
-                 'eventer', 'connection_errors',
-                 'task', 'eta', 'expires',
-                 'request_dict', 'acknowledged', 'success_msg',
-                 'error_msg', 'retry_msg', 'time_start', 'worker_pid',
-                 '_already_revoked', '_terminate_on_ack', '_tzlocal')
 
-    #: Format string used to log task success.
-    success_msg = """\
-        Task %(name)s[%(id)s] succeeded in %(runtime)ss: %(return_value)s
-    """
-
-    #: Format string used to log task failure.
-    error_msg = """\
-        Task %(name)s[%(id)s] raised exception: %(exc)s
-    """
-
-    #: Format string used to log internal error.
-    internal_error_msg = """\
-        Task %(name)s[%(id)s] INTERNAL ERROR: %(exc)s
-    """
-
-    #: Format string used to log task retry.
-    retry_msg = """Task %(name)s[%(id)s] retry: %(exc)s"""
+    __slots__ = (
+        'app', 'name', 'id', 'args', 'kwargs', 'on_ack', 'delivery_info',
+        'hostname', 'eventer', 'connection_errors', 'task', 'eta', 'expires',
+        'request_dict', 'acknowledged', 'time_start', 'worker_pid',
+        '_already_revoked', '_terminate_on_ack', '_tzlocal',
+    )
 
     def __init__(self, body, on_ack=noop,
             hostname=None, eventer=None, app=None,
@@ -317,18 +297,8 @@ class Request(object):
             self.acknowledge()
 
         if self.eventer and self.eventer.enabled:
-            now = time.time()
-            runtime = self.time_start and (time.time() - self.time_start) or 0
-            self.send_event('task-succeeded',
-                            result=safe_repr(ret_value), runtime=runtime)
-
-        if _does_info:
-            now = now or time.time()
-            runtime = self.time_start and (time.time() - self.time_start) or 0
-            info(self.success_msg.strip(), {
-                    'id': self.id, 'name': self.name,
-                    'return_value': self.repr_result(ret_value),
-                    'runtime': runtime})
+            result, runtime = ret_value
+            self.send_event('task-succeeded', result=result, runtime=runtime)
 
     def on_retry(self, exc_info):
         """Handler called if the task should be retried."""
@@ -338,11 +308,6 @@ class Request(object):
         self.send_event('task-retried',
                          exception=safe_repr(exc_info.exception.exc),
                          traceback=safe_str(exc_info.traceback))
-
-        if _does_info:
-            info(self.retry_msg.strip(), {
-                'id': self.id, 'name': self.name,
-                'exc': exc_info.exception})
 
     def on_failure(self, exc_info):
         """Handler called if the task raised an exception."""
@@ -362,62 +327,15 @@ class Request(object):
             if self.task.acks_late:
                 self.acknowledge()
 
-        self._log_error(exc_info)
-
-    def _log_error(self, einfo):
-        einfo.exception = get_pickled_exception(einfo.exception)
-        exception, traceback, exc_info, internal, sargs, skwargs = (
-            safe_repr(einfo.exception),
-            safe_str(einfo.traceback),
-            einfo.exc_info,
-            einfo.internal,
-            safe_repr(self.args),
-            safe_repr(self.kwargs),
-        )
-        format = self.error_msg
-        description = 'raised exception'
-        severity = logging.ERROR
         self.send_event('task-failed',
-                         exception=exception,
-                         traceback=traceback)
-
-        if internal:
-            format = self.internal_error_msg
-            description = 'INTERNAL ERROR'
-            severity = logging.CRITICAL
-
-        context = {
-            'hostname': self.hostname,
-            'id': self.id,
-            'name': self.name,
-            'exc': exception,
-            'traceback': traceback,
-            'args': sargs,
-            'kwargs': skwargs,
-            'description': description,
-        }
-
-        logger.log(severity, format.strip(), context,
-                   exc_info=exc_info,
-                   extra={'data': {'id': self.id,
-                                   'name': self.name,
-                                   'args': sargs,
-                                   'kwargs': skwargs,
-                                   'hostname': self.hostname,
-                                   'internal': internal}})
-
-        self.task.send_error_email(context, einfo.exception)
+                exception=safe_repr(get_pickled_exception(exc_info.exception)),
+                traceback=exc_info.traceback)
 
     def acknowledge(self):
         """Acknowledge task."""
         if not self.acknowledged:
             self.on_ack(logger, self.connection_errors)
             self.acknowledged = True
-
-    def repr_result(self, result, maxlen=46):
-        # 46 is the length needed to fit
-        #     'the quick brown fox jumps over the lazy dog' :)
-        return truncate(safe_repr(result), maxlen)
 
     def info(self, safe=False):
         return {'id': self.id,

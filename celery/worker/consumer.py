@@ -150,6 +150,7 @@ task_reserved = state.task_reserved
 logger = get_logger(__name__)
 info, warn, error, crit = (logger.info, logger.warn,
                            logger.error, logger.critical)
+_does_info = True
 
 
 def debug(msg, *args, **kwargs):
@@ -330,7 +331,6 @@ class Consumer(object):
         self.connection_errors = conninfo.connection_errors
         self.channel_errors = conninfo.channel_errors
 
-        self._does_info = logger.isEnabledFor(logging.INFO)
         self.strategies = {}
         if hub:
             hub.on_init.append(self.on_poll_init)
@@ -359,6 +359,8 @@ class Consumer(object):
         consuming messages.
 
         """
+        global _does_info
+        _does_info = logger.isEnabledFor(logging.INFO)
 
         self.init_callback(self)
 
@@ -483,7 +485,7 @@ class Consumer(object):
         if task.revoked():
             return
 
-        if self._does_info:
+        if _does_info:
             info('Got task from broker: %s', task)
 
         if self.event_dispatcher.enabled:
