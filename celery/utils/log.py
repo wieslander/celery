@@ -229,6 +229,11 @@ def reset_multiprocessing_logger():
         mputil._logger = None
 
 
+def current_process_index():
+    if current_process:
+        return getattr(current_process(), 'index', None)
+
+
 def _patch_logger_class():
     """Make sure loggers don't log while in a signal handler."""
 
