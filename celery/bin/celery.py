@@ -9,12 +9,12 @@ The :program:`celery` umbrella command.
 from __future__ import absolute_import, print_function
 
 import anyjson
-import warnings
+import heapq
 import sys
-
-from future_builtins import map
+import warnings
 
 from importlib import import_module
+from itertools import imap
 from pprint import pformat
 
 from celery.platforms import EX_OK, EX_FAILURE, EX_UNAVAILABLE, EX_USAGE
@@ -90,7 +90,7 @@ def load_extension_commands(namespace='celery.commands'):
             warnings.warn(
                 'Cannot load extension {0!r}: {1!r}'.format(sym, exc))
         else:
-            _get_extension_classes().append(ep.name)
+            heapq.heappush(_get_extension_classes(), ep.name)
             command(cls, name=ep.name)
 
 
@@ -523,7 +523,7 @@ class _RemoteControl(Command):
         destination = kwargs.get('destination')
         timeout = kwargs.get('timeout') or self.choices[method][0]
         if destination and isinstance(destination, basestring):
-            destination = list(map(str.strip, destination.split(',')))
+            destination = list(imap(str.strip, destination.split(',')))
 
         try:
             handler = getattr(self, method)
