@@ -5,7 +5,7 @@
 ============
 
 The :ref:`first-steps` guide is intentionally minimal.  In this guide
-we will demonstrate what Celery offers in more detail, including
+I will demonstrate what Celery offers in more detail, including
 how to add Celery support for your application and library.
 
 This document does not document all of Celery's features and
@@ -36,7 +36,7 @@ Project layout::
 .. literalinclude:: ../../examples/next-steps/proj/celery.py
     :language: python
 
-In this module we created our :class:`@Celery` instance (sometimes
+In this module you created our :class:`@Celery` instance (sometimes
 referred to as the *app*).  To use Celery within your project
 you simply import this instance.
 
@@ -47,17 +47,17 @@ you simply import this instance.
 - The ``backend`` argument specifies the result backend to use,
 
     It's used to keep track of task state and results.
-    While results are disabled by default we use the amqp backend here
-    to demonstrate how retrieving the results work, you may want to use
-    a different backend for your application, as they all have different
-    strengths and weaknesses.  If you don't need results it's best
+    While results are disabled by default I use the amqp backend here
+    because I demonstrate how retrieving results work later, you may want to use
+    a different backend for your application. They all have different
+    strengths and weaknesses.  If you don't need results it's better
     to disable them.  Results can also be disabled for individual tasks
     by setting the ``@task(ignore_result=True)`` option.
 
     See :ref:`celerytut-keeping-results` for more information.
 
 - The ``include`` argument is a list of modules to import when
-  the worker starts.  We need to add our tasks module here so
+  the worker starts.  You need to add our tasks module here so
   that the worker is able to find our tasks.
 
 :file:`proj/tasks.py`
@@ -70,7 +70,9 @@ you simply import this instance.
 Starting the worker
 -------------------
 
-The :program:`celery` program can be used to start the worker::
+The :program:`celery` program can be used to start the worker:
+
+.. code-block:: bash
 
     $ celery worker --app=proj -l info
 
@@ -124,7 +126,9 @@ and emulating priorities, all described in the :ref:`Routing Guide
 <guide-routing>`.
 
 You can get a complete list of command line arguments
-by passing in the `--help` flag::
+by passing in the `--help` flag:
+
+.. code-block:: bash
 
     $ celery worker --help
 
@@ -143,14 +147,18 @@ In production you will want to run the worker in the background, this is
 described in detail in the :ref:`daemonization tutorial <daemonizing>`.
 
 The daemonization scripts uses the :program:`celery multi` command to
-start one or more workers in the background::
+start one or more workers in the background:
+
+.. code-block:: bash
 
     $ celery multi start w1 -A proj -l info
     celeryd-multi v3.0.0 (Chiastic Slide)
     > Starting nodes...
         > w1.halcyon.local: OK
 
-You can restart it too::
+You can restart it too:
+
+.. code-block:: bash
 
     $ celery multi restart w1 -A proj -l info
     celeryd-multi v3.0.0 (Chiastic Slide)
@@ -163,7 +171,9 @@ You can restart it too::
     > Stopping nodes...
         > w1.halcyon.local: TERM -> 64052
 
-or stop it::
+or stop it:
+
+.. code-block:: bash
 
     $ celery multi stop -w1 -A proj -l info
 
@@ -176,7 +186,9 @@ or stop it::
 
 By default it will create pid and log files in the current directory,
 to protect against multiple workers launching on top of each other
-you are encouraged to put these in a dedicated directory::
+you are encouraged to put these in a dedicated directory:
+
+.. code-block:: bash
 
     $ mkdir -p /var/run/celery
     $ mkdir -p /var/log/celery
@@ -185,7 +197,9 @@ you are encouraged to put these in a dedicated directory::
 
 With the multi command you can start multiple workers, and there is a powerful
 command line syntax to specify arguments for different workers too,
-e.g::
+e.g:
+
+.. code-block:: bash
 
     $ celeryd multi start 10 -A proj -l info -Q:1-3 images,video -Q:4,5 data \
         -Q default -L:4,5 debug
@@ -205,6 +219,8 @@ If a package name is specified instead it will automatically
 try to find a ``celery`` module in that package, and if the name
 is a module it will try to find a ``celery`` attribute in that module.
 This means that these are all equal:
+
+.. code-block:: bash
 
     $ celery --app=proj
     $ celery --app=proj.celery:
@@ -259,9 +275,9 @@ backend that suits every application, so to choose one you need to consider
 the drawbacks of each individual backend.  For many tasks
 keeping the return value isn't even very useful, so it's a sensible default to
 have.  Also note that result backends are not used for monitoring tasks and workers,
-for that we use dedicated event messages (see :ref:`guide-monitoring`).
+for that Celery uses dedicated event messages (see :ref:`guide-monitoring`).
 
-If you have a result backend configured we can retrieve the return
+If you have a result backend configured you can retrieve the return
 value of a task::
 
     >>> res = add.delay(2, 2)
@@ -273,7 +289,7 @@ You can find the task's id by looking at the :attr:`id` attribute::
     >>> res.id
     d6b3aea2-fb9b-4ebc-8da4-848818db9114
 
-We can also inspect the exception and traceback if the task raised an
+You can also inspect the exception and traceback if the task raised an
 exception, in fact ``result.get()`` will propagate any errors by default::
 
     >>> res = add.delay(2)
@@ -343,7 +359,7 @@ Calling tasks is described in detail in the
 *Canvas*: Designing Workflows
 =============================
 
-We just learned how to call a task using the tasks ``delay`` method,
+You just learned how to call a task using the tasks ``delay`` method,
 and this is often all you need, but sometimes you may want to pass the
 signature of a task invocation to another process or as an argument to another
 function, for this Celery uses something called *subtasks*.
@@ -392,7 +408,7 @@ and this can be resolved when calling the subtask::
     >>> res.get()
     10
 
-Here we added the argument 8, which was prepended to the existing argument 2
+Here you added the argument 8, which was prepended to the existing argument 2
 forming a complete signature of ``add(8, 2)``.
 
 Keyword arguments can also be added later, these are then merged with any
@@ -414,8 +430,8 @@ As stated subtasks supports the calling API, which means that:
   to the arguments in the signature, and keyword arguments is merged with any
   existing keys.
 
-So this all seems very useful, but what can we actually do with these?
-To get to that we must introduce the canvas primitives...
+So this all seems very useful, but what can you actually do with these?
+To get to that I must introduce the canvas primitives...
 
 The Primitives
 --------------
@@ -552,14 +568,18 @@ with the ``queue`` argument to ``apply_async``::
     >>> add.apply_async((2, 2), queue='hipri')
 
 You can then make a worker consume from this queue by
-specifying the :option:`-Q` option::
+specifying the :option:`-Q` option:
+
+.. code-block:: bash
 
     $ celery -A proj worker -Q hipri
 
 You may specify multiple queues by using a comma separated list,
 for example you can make the worker consume from both the default
 queue, and the ``hipri`` queue, where
-the default queue is named ``celery`` for historical reasons::
+the default queue is named ``celery`` for historical reasons:
+
+.. code-block:: bash
 
     $ celery -A proj worker -Q hipri,celery
 
@@ -575,7 +595,9 @@ Remote Control
 If you're using RabbitMQ (AMQP), Redis or MongoDB as the broker then
 you can control and inspect the worker at runtime.
 
-For example you can see what tasks the worker is currently working on::
+For example you can see what tasks the worker is currently working on:
+
+.. code-block:: bash
 
     $ celery -A proj inspect active
 
@@ -584,7 +606,9 @@ control commands are received by every worker in the cluster.
 
 You can also specify one or more workers to act on the request
 using the :option:`--destination` option, which is a comma separated
-list of worker host names::
+list of worker host names:
+
+.. code-block:: bash
 
     $ celery -A proj inspect active --destination=worker1.example.com
 
@@ -594,35 +618,49 @@ to the request.
 The :program:`celery inspect` command contains commands that
 does not change anything in the worker, it only replies information
 and statistics about what is going on inside the worker.
-For a list of inspect commands you can execute::
+For a list of inspect commands you can execute:
+
+.. code-block:: bash
 
     $ celery -A proj inspect --help
 
 Then there is the :program:`celery control` command, which contains
-commands that actually changes things in the worker at runtime::
+commands that actually changes things in the worker at runtime:
+
+.. code-block:: bash
 
     $ celery -A proj control --help
 
 For example you can force workers to enable event messages (used
-for monitoring tasks and workers)::
+for monitoring tasks and workers):
+
+.. code-block:: bash
 
     $ celery -A proj control enable_events
 
 When events are enabled you can then start the event dumper
-to see what the workers are doing::
+to see what the workers are doing:
+
+.. code-block:: bash
 
     $ celery -A proj events --dump
 
-or you can start the curses interface::
+or you can start the curses interface:
+
+.. code-block:: bash
 
     $ celery -A proj events
 
-when you're finished monitoring you can disable events again::
+when you're finished monitoring you can disable events again:
+
+.. code-block:: bash
 
     $ celery -A proj control disable_events
 
 The :program:`celery status` command also uses remote control commands
-and shows a list of online workers in the cluster::
+and shows a list of online workers in the cluster:
+
+.. code-block:: bash
 
     $ celery -A proj status
 
@@ -637,13 +675,7 @@ All times and dates, internally and in messages uses the UTC timezone.
 When the worker receives a message, for example with a countdown set it
 converts that UTC time to local time.  If you wish to use
 a different timezone than the system timezone then you must
-configure that using the :setting:`CELERY_TIMEZONE` setting.
-
-To use custom timezones you also have to install the :mod:`pytz` library::
-
-    $ pip install pytz
-
-Setting a custom timezone::
+configure that using the :setting:`CELERY_TIMEZONE` setting::
 
     celery.conf.CELERY_TIMEZONE = 'Europe/London'
 
@@ -659,7 +691,9 @@ for throughput then you should read the :ref:`Optimizing Guide
 <guide-optimizing>`.
 
 If you're using RabbitMQ then you should install the :mod:`librabbitmq`
-module, which is an AMQP client implemented in C::
+module, which is an AMQP client implemented in C:
+
+.. code-block:: bash
 
     $ pip install librabbitmq
 

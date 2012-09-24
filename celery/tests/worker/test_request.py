@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
-from __future__ import with_statement
 
 import anyjson
 import os
@@ -20,14 +19,20 @@ from celery import states
 from celery.app import app_or_default
 from celery.concurrency.base import BasePool
 from celery.datastructures import ExceptionInfo
-from celery.exceptions import (RetryTaskError,
-                               WorkerLostError, InvalidTaskError)
+from celery.exceptions import (
+    RetryTaskError,
+    WorkerLostError,
+    InvalidTaskError,
+    TaskRevokedError,
+)
 from celery.task.trace import (
     trace_task,
-    trace_task_ret,
+    _trace_task_ret,
     TraceInfo,
     mro_lookup,
     build_tracer,
+    setup_worker_optimizations,
+    reset_worker_optimizations,
 )
 from celery.result import AsyncResult
 from celery.signals import task_revoked
@@ -38,7 +43,7 @@ from celery.worker import job as module
 from celery.worker.job import Request, TaskRequest
 from celery.worker.state import revoked
 
-from celery.tests.utils import Case, assert_signal_called
+from celery.tests.utils import AppCase, Case, assert_signal_called
 
 scratch = {'ACK': False}
 some_kwargs_scratchpad = {}
@@ -142,7 +147,7 @@ class test_RetryTaskError(Case):
     def test_retry_task_error(self):
         try:
             raise Exception('foo')
-        except Exception, exc:
+        except Exception as exc:
             ret = RetryTaskError('Retrying task', exc)
             self.assertEqual(ret.exc, exc)
 
@@ -228,7 +233,7 @@ class MockEventDispatcher(object):
         self.sent.append(event)
 
 
-class test_TaskRequest(Case):
+class test_TaskRequest(AppCase):
 
     def test_task_wrapper_repr(self):
         tw = TaskRequest(mytask.name, uuid(), [1], {'f': 'x'})
@@ -376,21 +381,12 @@ class test_TaskRequest(Case):
             einfo = get_ei()
             mail_sent[0] = False
             mytask.send_error_emails = True
-            mytask.error_whitelist = [KeyError]
             tw.on_failure(einfo)
             self.assertTrue(mail_sent[0])
-
-            einfo = get_ei()
-            mail_sent[0] = False
-            mytask.send_error_emails = True
-            mytask.error_whitelist = [SyntaxError]
-            tw.on_failure(einfo)
-            self.assertFalse(mail_sent[0])
 
         finally:
             app.mail_admins = old_mail_admins
             mytask.send_error_emails = old_enable_mails
-            mytask.error_whitelist = ()
 
     def test_already_revoked(self):
         tw = TaskRequest(mytask.name, uuid(), [1], {'f': 'x'})
@@ -427,7 +423,8 @@ class test_TaskRequest(Case):
     def test_execute_using_pool_does_not_execute_revoked(self):
         tw = TaskRequest(mytask.name, uuid(), [1], {'f': 'x'})
         revoked.add(tw.id)
-        tw.execute_using_pool(None)
+        with self.assertRaises(TaskRevokedError):
+            tw.execute_using_pool(None)
 
     def test_on_accepted_acks_early(self):
         tw = TaskRequest(mytask.name, uuid(), [1], {'f': 'x'})
@@ -575,10 +572,34 @@ class test_TaskRequest(Case):
         finally:
             mytask.ignore_result = False
 
+    def test_fast_trace_task(self):
+        from celery.task import trace
+        setup_worker_optimizations(self.app)
+        self.assertIs(trace.trace_task_ret, trace._fast_trace_task)
+        try:
+            mytask.__trace__ = build_tracer(mytask.name, mytask,
+                                            self.app.loader, 'test')
+            res = trace.trace_task_ret(mytask.name, uuid(), [4], {})
+            self.assertEqual(res, 4 ** 4)
+        finally:
+            reset_worker_optimizations()
+            self.assertIs(trace.trace_task_ret, trace._trace_task_ret)
+        delattr(mytask, '__trace__')
+        res = trace.trace_task_ret(mytask.name, uuid(), [4], {})
+        self.assertEqual(res, 4 ** 4)
+
     def test_trace_task_ret(self):
         mytask.__trace__ = build_tracer(mytask.name, mytask,
-                                        current_app.loader, 'test')
-        res = trace_task_ret(mytask.name, uuid(), [4], {})
+                                        self.app.loader, 'test')
+        res = _trace_task_ret(mytask.name, uuid(), [4], {})
+        self.assertEqual(res, 4 ** 4)
+
+    def test_trace_task_ret__no_trace(self):
+        try:
+            delattr(mytask, '__trace__')
+        except AttributeError:
+            pass
+        res = _trace_task_ret(mytask.name, uuid(), [4], {})
         self.assertEqual(res, 4 ** 4)
 
     def test_execute_safe_catches_exception(self):
@@ -601,10 +622,10 @@ class test_TaskRequest(Case):
         mytask.request.update({'id': tid})
         try:
             raise ValueError('foo')
-        except Exception, exc:
+        except Exception as exc:
             try:
                 raise RetryTaskError(str(exc), exc=exc)
-            except RetryTaskError, exc:
+            except RetryTaskError as exc:
                 w = TraceInfo(states.RETRY, exc)
                 w.handle_retry(mytask, store_errors=False)
                 self.assertEqual(mytask.backend.get_status(tid),
@@ -621,7 +642,7 @@ class test_TaskRequest(Case):
         try:
             try:
                 raise ValueError('foo')
-            except Exception, exc:
+            except Exception as exc:
                 w = TraceInfo(states.FAILURE, exc)
                 w.handle_failure(mytask, store_errors=False)
                 self.assertEqual(mytask.backend.get_status(tid),
@@ -773,7 +794,11 @@ class test_TaskRequest(Case):
                     'task_id': tw.id,
                     'task_retries': 0,
                     'task_is_eager': False,
-                    'delivery_info': {'exchange': None, 'routing_key': None},
+                    'delivery_info': {
+                        'exchange': None,
+                        'routing_key': None,
+                        'priority': None,
+                    },
                     'task_name': tw.name})
 
     @patch('celery.worker.job.logger')

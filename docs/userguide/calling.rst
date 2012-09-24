@@ -66,7 +66,7 @@ function:
 
     task.delay(arg1, arg2, kwarg1='x', kwarg2='y')
 
-Using :meth:`~@Task.apply_async` instead we have to write:
+Using :meth:`~@Task.apply_async` instead you have to write:
 
 .. code-block:: python
 
@@ -87,7 +87,7 @@ called `add`, returning the sum of two arguments:
 
 .. code-block:: python
 
-    @celery.task()
+    @celery.task
     def add(x, y):
         return x + y
 
@@ -118,7 +118,7 @@ as a partial argument:
 
 .. sidebar:: What is ``s``?
 
-    The ``add.s`` call used here is called a subtask, we talk
+    The ``add.s`` call used here is called a subtask, I talk
     more about subtasks in the :ref:`canvas guide <guide-canvas>`,
     where you can also learn about :class:`~celery.chain`, which
     is a simpler way to chain tasks together.
@@ -144,12 +144,12 @@ This is an example error callback:
 
 .. code-block:: python
 
-    @celery.task()
+    @celery.task
     def error_handler(uuid):
         result = AsyncResult(uuid)
         exc = result.get(propagate=False)
-        print('Task %r raised exception: %r\n%r' % (
-              exc, result.traceback))
+        print('Task {0} raised exception: {1!r}\n{2!r}'.format(
+              uuid, exc, result.traceback))
 
 it can be added to the task using the ``link_error`` execution
 option:
@@ -462,7 +462,9 @@ Simple routing (name <-> name) is accomplished using the ``queue`` option::
     add.apply_async(queue='priority.high')
 
 You can then assign workers to the ``priority.high`` queue by using
-the workers :option:`-Q` argument::
+the workers :option:`-Q` argument:
+
+.. code-block:: bash
 
     $ celery worker -l info -Q celery,priority.high
 

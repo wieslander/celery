@@ -15,10 +15,11 @@ Subtasks
 
 .. versionadded:: 2.0
 
-We just learned how to call a task using the tasks ``delay`` method,
-and this is often all you need, but sometimes you may want to pass the
-signature of a task invocation to another process or as an argument to another
-function, for this Celery uses something called *subtasks*.
+You just learned how to call a task using the tasks ``delay`` method
+in the :ref:`calling <guide-calling>` guide, and this is often all you need,
+but sometimes you may want to pass the signature of a task invocation to
+another process or as an argument to another function, for this Celery uses
+something called *subtasks*.
 
 A :func:`~celery.subtask` wraps the arguments, keyword arguments, and execution options
 of a single task invocation in a way such that it can be passed to functions
@@ -30,8 +31,8 @@ or even serialized and sent across the wire.
         >>> subtask('tasks.add', args=(2, 2), countdown=10)
         tasks.add(2, 2)
 
-    This subtask has a signature of arity 2 (two arguments): ``(2, 2)``,
-    and sets the countdown execution option to 10.
+  This subtask has a signature of arity 2 (two arguments): ``(2, 2)``,
+  and sets the countdown execution option to 10.
 
 - or you can create one using the task's ``subtask`` method::
 
@@ -48,7 +49,7 @@ or even serialized and sent across the wire.
         >>> add.s(2, 2, debug=True)
         tasks.add(2, 2, debug=True)
 
-- From any subtask instance we can inspect the different fields::
+- From any subtask instance you can inspect the different fields::
 
         >>> s = add.subtask((2, 2), {'debug': True}, countdown=10)
         >>> s.args
@@ -133,7 +134,7 @@ so it's not possible to call the subtask with partial args/kwargs.
 
 .. note::
 
-    In this tutorial we sometimes use the prefix operator `~` to subtasks.
+    In this tutorial I sometimes use the prefix operator `~` to subtasks.
     You probably shouldn't use it in your production code, but it's a handy shortcut
     when experimenting in the Python shell::
 
@@ -151,14 +152,14 @@ Callbacks
 .. versionadded:: 3.0
 
 Callbacks can be added to any task using the ``link`` argument
-to ``apply_async``:
+to ``apply_async``::
 
     add.apply_async((2, 2), link=other_task.subtask())
 
 The callback will only be applied if the task exited successfully,
 and it will be applied with the return value of the parent task as argument.
 
-As we mentioned earlier, any arguments you add to `subtask`,
+As I mentioned earlier, any arguments you add to `subtask`,
 will be prepended to the arguments specified by the subtask itself!
 
 If you have the subtask::
@@ -198,9 +199,9 @@ The Primitives
 
     - ``chord``
 
-        A chord is just like a group but with a callback.  A group consists
+        A chord is just like a group but with a callback.  A chord consists
         of a header group and a body,  where the body is a task that should execute
-        after all of the tasks in the header is complete.
+        after all of the tasks in the header are complete.
 
     - ``map``
 
@@ -232,7 +233,7 @@ The Primitives
 The primitives are also subtasks themselves, so that they can be combined
 in any number of ways to compose complex workflows.
 
-Here's some examples::
+Here's some examples:
 
 - Simple chain
 
@@ -255,7 +256,7 @@ Here's some examples::
 
 - Immutable subtasks
 
-    As we have learned signatures can be partial, so that arguments can be
+    Signatures can be partial so arguments can be
     added to the existing arguments, but you may not always want that,
     for example if you don't want the result of the previous task in a chain.
 
@@ -268,7 +269,7 @@ Here's some examples::
 
         >>> add.si(2, 2)
 
-    Now we can create a chain of independent tasks instead::
+    Now you can create a chain of independent tasks instead::
 
         >>> res = (add.si(2, 2), add.si(4, 4), add.s(8, 8))()
         >>> res.get()
@@ -282,7 +283,7 @@ Here's some examples::
 
 - Simple group
 
-    We can easily create a group of tasks to execute in parallel::
+    You can easily create a group of tasks to execute in parallel::
 
         >>> from celery import group
         >>> res = group(add.s(i, i) for i in xrange(10))()
@@ -305,7 +306,7 @@ Here's some examples::
             >>> g = group(add.s(i, i) for i in xrange(10))
             >>> g.apply_async()
 
-        This is useful because we can e.g. specify a time for the
+        This is useful because you can e.g. specify a time for the
         messages in the group to be called::
 
             >>> g.apply_async(countdown=10)
@@ -313,7 +314,7 @@ Here's some examples::
 - Simple chord
 
     The chord primitive enables us to add callback to be called when
-    all of the tasks in a group has finished executing, which is often
+    all of the tasks in a group have finished executing, which is often
     required for algorithms that aren't embarrassingly parallel::
 
         >>> from celery import chord
@@ -322,7 +323,7 @@ Here's some examples::
         90
 
     The above example creates 10 task that all start in parallel,
-    and when all of them is complete the return values is combined
+    and when all of them are complete the return values are combined
     into a list and sent to the ``xsum`` task.
 
     The body of a chord can also be immutable, so that the return value
@@ -457,15 +458,17 @@ the error callbacks take the id of the parent task as argument instead:
 
 .. code-block:: python
 
+    from __future__ import print_function
+    import os
     from proj.celery import celery
 
-    @celery.task()
+    @celery.task
     def log_error(task_id):
         result = celery.AsyncResult(task_id)
         result.get(propagate=False)  # make sure result written.
-        with open('/var/errors/%s' % (task_id, )) as fh:
-            fh.write('--\n\n%s %s %s' % (
-                task_id, result.result, result.traceback))
+        with open(os.path.join('/var/errors', task_id)) as fh:
+            print('--\n\n{0} {1} {2}'.format(
+                task_id, result.result, result.traceback), file=fh)
 
 To make it even easier to link tasks together there is
 a special subtask called :class:`~celery.chain` that lets
@@ -478,13 +481,13 @@ you chain tasks together:
 
     # (4 + 4) * 8 * 10
     >>> res = chain(add.s(4, 4), mul.s(8), mul.s(10))
-    proj.tasks.add(4, 4) | proj.tasks.mul(8)
+    proj.tasks.add(4, 4) | proj.tasks.mul(8) | proj.tasks.mul(10)
 
 
 Calling the chain will call the tasks in the current process
 and return the result of the last task in the chain::
 
-    >>> res = chain(add.s(4, 4), mul.s(8), mul.s(10))
+    >>> res = chain(add.s(4, 4), mul.s(8), mul.s(10))()
     >>> res.get()
     640
 
@@ -492,7 +495,7 @@ And calling ``apply_async`` will create a dedicated
 task so that the act of calling the chain happens
 in a worker::
 
-    >>> res = chain(add.s(4, 4), mul.s(8), mul.s(10))
+    >>> res = chain(add.s(4, 4), mul.s(8), mul.s(10)).apply_async()
     >>> res.get()
     640
 
@@ -536,7 +539,9 @@ You can even convert these graphs to *dot* format::
     ...     res.parent.parent.graph.to_dot(fh)
 
 
-and create images::
+and create images:
+
+.. code-block:: bash
 
     $ dot -Tpng graph.dot -o graph.png
 
@@ -581,7 +586,7 @@ Group also supports iterators::
 
     >>> group(add.s(i, i) for i in xrange(100))()
 
-A group is a subclass instance, so it can be used in combination
+A group is a subtask instance, so it can be used in combination
 with other subtasks.
 
 Group Results
@@ -612,8 +617,8 @@ that it works on the group as a whole::
     [4, 8, 16, 32, 64]
 
 The :class:`~celery.result.GroupResult` takes a list of
-:class:`~celery.result.AsyncResult` instances and operates on them as if it was a
-single task.
+:class:`~celery.result.AsyncResult` instances and operates on them as
+if it was a single task.
 
 It supports the following operations:
 
@@ -662,28 +667,28 @@ Chords
 
 .. versionadded:: 2.3
 
-A chord is a task that only executes after all of the tasks in a taskset has
+A chord is a task that only executes after all of the tasks in a taskset have
 finished executing.
 
 
 Let's calculate the sum of the expression
 :math:`1 + 1 + 2 + 2 + 3 + 3 ... n + n` up to a hundred digits.
 
-First we need two tasks, :func:`add` and :func:`tsum` (:func:`sum` is
+First you need two tasks, :func:`add` and :func:`tsum` (:func:`sum` is
 already a standard function):
 
 .. code-block:: python
 
-    @celery.task()
+    @celery.task
     def add(x, y):
         return x + y
 
-    @celery.task()
+    @celery.task
     def tsum(numbers):
         return sum(numbers)
 
 
-Now we can use a chord to calculate each addition step in parallel, and then
+Now you can use a chord to calculate each addition step in parallel, and then
 get the sum of the resulting numbers::
 
     >>> from celery import chord
@@ -712,7 +717,7 @@ Let's break the chord expression down::
     9900
 
 Remember, the callback can only be executed after all of the tasks in the
-header has returned.  Each step in the header is executed as a task, in
+header have returned.  Each step in the header is executed as a task, in
 parallel, possibly on different nodes.  The callback is then applied with
 the return value of each task in the header.  The task id returned by
 :meth:`chord` is the id of the callback, so you can wait for it to complete
@@ -738,11 +743,11 @@ Example implementation:
         raise unlock_chord.retry(countdown=interval, max_retries=max_retries)
 
 
-This is used by all result backends except Redis and Memcached, which increment a
-counter after each task in the header, then applying the callback when the
-counter exceeds the number of tasks in the set. *Note:* chords do not properly
-work with Redis before version 2.2; you will need to upgrade to at least 2.2 to
-use them.
+This is used by all result backends except Redis and Memcached, which
+increment a counter after each task in the header, then applying the callback
+when the counter exceeds the number of tasks in the set. *Note:* chords do not
+properly work with Redis before version 2.2; you will need to upgrade to at
+least 2.2 to use them.
 
 The Redis and Memcached approach is a much better solution, but not easily
 implemented in other backends (suggestions welcome!).
@@ -787,7 +792,7 @@ is the same as having a task doing:
 
 .. code-block:: python
 
-    @celery.task()
+    @celery.task
     def temp():
         return [xsum(range(10)), xsum(range(100))]
 
@@ -800,7 +805,7 @@ is the same as having a task doing:
 
 .. code-block:: python
 
-    @celery.task()
+    @celery.task
     def temp():
         return [add(i, i) for i in range(10)]
 
@@ -815,9 +820,9 @@ to call the starmap after 10 seconds::
 Chunks
 ------
 
--- Chunking lets you divide an iterable of work into pieces,
-   so that if you have one million objects, you can create
-   10 tasks with hundred thousand objects each.
+Chunking lets you divide an iterable of work into pieces, so that if
+you have one million objects, you can create 10 tasks with hundred
+thousand objects each.
 
 Some may worry that chunking your tasks results in a degradation
 of parallelism, but this is rarely true for a busy cluster

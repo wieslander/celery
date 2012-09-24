@@ -71,10 +71,11 @@ intersphinx_mapping = {
         "http://kombu.readthedocs.org/en/latest/": None,
         "http://django-celery.readthedocs.org/en/latest": None,
         "http://cyme.readthedocs.org/en/latest": None,
+        "http://amqp.readthedocs.org/en/latest": None,
 }
 
 # The name of the Pygments (syntax highlighting) style to use.
-pygments_style = 'trac'
+pygments_style = 'colorful'
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,

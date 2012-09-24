@@ -8,24 +8,26 @@
 """
 from __future__ import absolute_import
 
-from kombu.utils import cached_property
+import os
+import time as _time
+from itertools import izip
 
-from datetime import datetime, timedelta
-from dateutil import tz
-from dateutil.parser import parse as parse_iso8601
+from calendar import monthrange
+from datetime import date, datetime, timedelta, tzinfo
 
-from celery.exceptions import ImproperlyConfigured
+from kombu.utils import cached_property, reprcall
 
+from pytz import timezone as _timezone
+
+from .functional import dictfilter
+from .iso8601 import parse_iso8601
 from .text import pluralize
 
-try:
-    import pytz
-except ImportError:     # pragma: no cover
-    pytz = None         # noqa
 
+C_REMDEBUG = os.environ.get('C_REMDEBUG', False)
 
 DAYNAMES = 'sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'
-WEEKDAYS = dict((name, dow) for name, dow in zip(DAYNAMES, range(7)))
+WEEKDAYS = dict(izip(DAYNAMES, range(7)))
 
 RATE_MODIFIER_MAP = {'s': lambda n: n,
                      'm': lambda n: n / 60.0,
@@ -34,10 +36,65 @@ RATE_MODIFIER_MAP = {'s': lambda n: n,
 
 HAVE_TIMEDELTA_TOTAL_SECONDS = hasattr(timedelta, 'total_seconds')
 
-TIME_UNITS = (('day', 60 * 60 * 24.0, lambda n: '%.2f' % n),
-              ('hour', 60 * 60.0, lambda n: '%.2f' % n),
-              ('minute', 60.0, lambda n: '%.2f' % n),
-              ('second', 1.0, lambda n: '%.2f' % n))
+TIME_UNITS = (('day',    60 * 60 * 24.0, lambda n: format(n, '.2f')),
+              ('hour',   60 * 60.0,      lambda n: format(n, '.2f')),
+              ('minute', 60.0,           lambda n: format(n, '.2f')),
+              ('second', 1.0,            lambda n: format(n, '.2f')))
+
+ZERO = timedelta(0)
+
+_local_timezone = None
+
+
+class LocalTimezone(tzinfo):
+    """Local time implementation taken from Python's docs.
+
+    Used only when UTC is not enabled.
+    """
+
+    def __init__(self):
+        # This code is moved in __init__ to execute it as late as possible
+        # See get_default_timezone().
+        self.STDOFFSET = timedelta(seconds=-_time.timezone)
+        if _time.daylight:
+            self.DSTOFFSET = timedelta(seconds=-_time.altzone)
+        else:
+            self.DSTOFFSET = self.STDOFFSET
+        self.DSTDIFF = self.DSTOFFSET - self.STDOFFSET
+        tzinfo.__init__(self)
+
+    def __repr__(self):
+        return '<LocalTimezone>'
+
+    def utcoffset(self, dt):
+        if self._isdst(dt):
+            return self.DSTOFFSET
+        else:
+            return self.STDOFFSET
+
+    def dst(self, dt):
+        if self._isdst(dt):
+            return self.DSTDIFF
+        else:
+            return ZERO
+
+    def tzname(self, dt):
+        return _time.tzname[self._isdst(dt)]
+
+    def _isdst(self, dt):
+        tt = (dt.year, dt.month, dt.day,
+              dt.hour, dt.minute, dt.second,
+              dt.weekday(), 0, 0)
+        stamp = _time.mktime(tt)
+        tt = _time.localtime(stamp)
+        return tt.tm_isdst > 0
+
+
+def _get_local_timezone():
+    global _local_timezone
+    if _local_timezone is None:
+        _local_timezone = LocalTimezone()
+    return _local_timezone
 
 
 class _Zone(object):
@@ -48,22 +105,23 @@ class _Zone(object):
         return self.get_timezone(tzinfo)
 
     def to_local(self, dt, local=None, orig=None):
-        return dt.replace(tzinfo=orig or self.utc).astimezone(
-                    self.tz_or_local(local))
+        if is_naive(dt):
+            dt = make_aware(dt, orig or self.utc)
+        return localize(dt, self.tz_or_local(local))
+
+    def to_local_fallback(self, dt, *args, **kwargs):
+        if is_naive(dt):
+            return make_aware(dt, _get_local_timezone())
+        return localize(dt, _get_local_timezone())
 
     def get_timezone(self, zone):
         if isinstance(zone, basestring):
-            if pytz is None:
-                if zone == 'UTC':
-                    return tz.gettz('UTC')
-                raise ImproperlyConfigured(
-                    'Timezones requires the pytz library')
-            return pytz.timezone(zone)
+            return _timezone(zone)
         return zone
 
     @cached_property
     def local(self):
-        return tz.tzlocal()
+        return _get_local_timezone()
 
     @cached_property
     def utc(self):
@@ -138,11 +196,14 @@ def remaining(start, ends_in, now=None, relative=False):
 
     """
     now = now or datetime.utcnow()
-
     end_date = start + ends_in
     if relative:
         end_date = delta_resolution(end_date, ends_in)
-    return end_date - now
+    ret = end_date - now
+    if C_REMDEBUG:
+        print('rem: NOW:%r START:%r ENDS_IN:%r END_DATE:%s REM:%s' % (
+            now, start, ends_in, end_date, ret))
+    return ret
 
 
 def rate(rate):
@@ -173,15 +234,20 @@ def weekday(name):
         raise KeyError(name)
 
 
-def humanize_seconds(secs, prefix=''):
+def humanize_seconds(secs, prefix='', sep=''):
     """Show seconds in human form, e.g. 60 is "1 minute", 7200 is "2
-    hours"."""
+    hours".
+
+    :keyword prefix: Can be used to add a preposition to the output,
+        e.g. 'in' will give 'in 1 second', but add nothing to 'now'.
+
+    """
     secs = float(secs)
     for unit, divider, formatter in TIME_UNITS:
         if secs >= divider:
             w = secs / divider
-            return '%s%s %s' % (prefix, formatter(w),
-                                pluralize(w, unit))
+            return '{0}{1}{2} {3}'.format(prefix, sep, formatter(w),
+                                          pluralize(w, unit))
     return 'now'
 
 
@@ -192,3 +258,84 @@ def maybe_iso8601(dt):
     if isinstance(dt, datetime):
         return dt
     return parse_iso8601(dt)
+
+
+def is_naive(dt):
+    """Returns :const:`True` if the datetime is naive
+    (does not have timezone information)."""
+    return dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None
+
+
+def make_aware(dt, tz):
+    """Sets the timezone for a datetime object."""
+    try:
+        localize = tz.localize
+    except AttributeError:
+        return dt.replace(tzinfo=tz)
+    else:
+        # works on pytz timezones
+        return localize(dt, is_dst=None)
+
+
+def localize(dt, tz):
+    """Convert aware datetime to another timezone."""
+    dt = dt.astimezone(tz)
+    try:
+        normalize = tz.normalize
+    except AttributeError:
+        return dt
+    else:
+        return normalize(dt)  # pytz
+
+
+def to_utc(dt):
+    """Converts naive datetime to UTC"""
+    return make_aware(dt, timezone.utc)
+
+
+def maybe_make_aware(dt, tz=None):
+    if is_naive(dt):
+        dt = to_utc(dt)
+    return localize(dt,
+        timezone.utc if tz is None else timezone.tz_or_local(tz))
+
+
+class ffwd(object):
+    """Version of relativedelta that only supports addition."""
+
+    def __init__(self, year=None, month=None, weeks=0, weekday=None, day=None,
+            hour=None, minute=None, second=None, microsecond=None, **kwargs):
+        self.year = year
+        self.month = month
+        self.weeks = weeks
+        self.weekday = weekday
+        self.day = day
+        self.hour = hour
+        self.minute = minute
+        self.second = second
+        self.microsecond = microsecond
+        self.days = weeks * 7
+        self._has_time = self.hour is not None or self.minute is not None
+
+    def __repr__(self):
+        return reprcall('ffwd', (), self._fields(weeks=self.weeks,
+                                                 weekday=self.weekday))
+
+    def __radd__(self, other):
+        if not isinstance(other, date):
+            return NotImplemented
+        year = self.year or other.year
+        month = self.month or other.month
+        day = min(monthrange(year, month)[1], self.day or other.day)
+        ret = other.replace(**dict(dictfilter(self._fields()),
+                            year=year, month=month, day=day))
+        if self.weekday is not None:
+            ret += timedelta(days=(7 - ret.weekday() + self.weekday) % 7)
+        return ret + timedelta(days=self.days)
+
+    def _fields(self, **extra):
+        return dictfilter({
+            'year': self.year, 'month': self.month, 'day': self.day,
+            'hour': self.hour, 'minute': self.minute,
+            'second': self.second, 'microsecond': self.microsecond,
+        }, **extra)

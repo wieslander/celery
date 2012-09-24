@@ -45,7 +45,7 @@ Whenever you define a task, that task will also be added to the local registry:
 
 .. code-block:: python
 
-    >>> @celery.task()
+    >>> @celery.task
     ... def add(x, y):
     ...     return x + y
 
@@ -58,7 +58,7 @@ Whenever you define a task, that task will also be added to the local registry:
     >>> celery.tasks['__main__.add']
     <@task: __main__.add>
 
-and there we see that ``__main__`` again; whenever Celery is not able
+and there you see that ``__main__`` again; whenever Celery is not able
 to detect what module the function belongs to, it uses the main module
 name to generate the beginning of the task name.
 
@@ -76,7 +76,7 @@ For example here, where the tasks module is also used to start a worker:
     from celery import Celery
     celery = Celery()
 
-    @celery.task()
+    @celery.task
     def add(x, y): return x + y
 
     if __name__ == '__main__':
@@ -98,7 +98,7 @@ You can specify another name for the main module:
     >>> celery.main
     'tasks'
 
-    >>> @celery.task()
+    >>> @celery.task
     ... def add(x, y):
     ...     return x + y
 
@@ -145,13 +145,6 @@ that are consulted in order:
 
 ``config_from_object``
 ----------------------
-
-.. sidebar:: Timezones & pytz
-
-    Setting a time zone other than UTC requires the :mod:`pytz` library
-    to be installed, see the :setting:`CELERY_TIMEZONE` setting for more
-    information.
-
 
 The :meth:`@Celery.config_from_object` method loads configuration
 from a configuration object.
@@ -228,7 +221,9 @@ environment variable named :envvar:`CELERY_CONFIG_MODULE`:
     celery = Celery()
     celery.config_from_envvar('CELERY_CONFIG_MODULE')
 
-You can then specify the configuration module to use via the environment::
+You can then specify the configuration module to use via the environment:
+
+.. code-block:: bash
 
     $ CELERY_CONFIG_MODULE="celeryconfig.prod" celery worker -l info
 
@@ -252,11 +247,11 @@ of the task to happen either when the task is used, or after the
 application has been *finalized*,
 
 This example shows how the task is not created until
-we use the task, or access an attribute (in this case :meth:`repr`):
+you use the task, or access an attribute (in this case :meth:`repr`):
 
 .. code-block:: python
 
-    >>> @celery.task()
+    >>> @celery.task
     >>> def add(x, y):
     ...    return x + y
 
@@ -272,7 +267,7 @@ we use the task, or access an attribute (in this case :meth:`repr`):
     >>> add.__evaluated__()
     True
 
-*Finalization* of the appq happens either explicitly by calling
+*Finalization* of the app happens either explicitly by calling
 :meth:`@Celery.finalize` -- or implicitly by accessing the :attr:`~@Celery.tasks`
 attribute.
 
@@ -327,7 +322,7 @@ While it's possible to depend on the current app
 being set, the best practice is to always pass the app instance
 around to anything that needs it.
 
-We call this the "app chain", since it creates a chain
+I call this the "app chain", since it creates a chain
 of instances depending on the app being passed.
 
 The following example is considered bad practice:
@@ -363,7 +358,9 @@ so that everything also works in the module-based compatibility API
 
 In development you can set the :envvar:`CELERY_TRACE_APP`
 environment variable to raise an exception if the app
-chain breaks::
+chain breaks:
+
+.. code-block:: bash
 
     $ CELERY_TRACE_APP=1 celery worker -l info
 
@@ -379,7 +376,7 @@ chain breaks::
     .. code-block:: python
 
         def hello(to):
-            return 'hello %s' % to
+            return 'hello {0}'.format(to)
 
         >>> from celery.execute import apply_async
 
@@ -397,7 +394,7 @@ chain breaks::
             send_error_emails = True
 
             def run(self, to):
-                return 'hello %s' % to
+                return 'hello {0}'.format(to)
         tasks.register(Hello)
 
         >>> Hello.delay('world!')
@@ -413,7 +410,7 @@ chain breaks::
 
         @task(send_error_emails=True)
         def hello(x):
-            return 'hello %s' % to
+            return 'hello {0}'.format(to)
 
 Abstract Tasks
 ==============
@@ -440,7 +437,7 @@ class: :class:`celery.Task`.
         abstract = True
 
         def __call__(self, *args, **kwargs):
-            print('TASK STARTING: %s[%s]' % (self.name, self.request.id))
+            print('TASK STARTING: {0.name}[{0.request.id}].format(self))
             return self.run(*args, **kwargs)
 
 
@@ -468,7 +465,7 @@ by changing its :meth:`@Celery.Task` attribute:
     >>> celery.Task
     <unbound MyBaseTask>
 
-    >>> @x.task()
+    >>> @x.task
     ... def add(x, y):
     ...     return x + y
 

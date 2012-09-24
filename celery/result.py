@@ -7,7 +7,6 @@
 
 """
 from __future__ import absolute_import
-from __future__ import with_statement
 
 import time
 
@@ -15,13 +14,14 @@ from collections import deque
 from copy import copy
 from itertools import imap
 
+from kombu.utils import cached_property
+from kombu.utils.compat import OrderedDict
+
 from . import current_app
 from . import states
 from .app import app_or_default
 from .datastructures import DependencyGraph
 from .exceptions import IncompleteStream, TimeoutError
-from .utils import cached_property
-from .utils.compat import OrderedDict
 
 
 def from_serializable(r):
@@ -75,14 +75,20 @@ class AsyncResult(ResultBase):
         """Forget about (and possibly remove the result of) this task."""
         self.backend.forget(self.id)
 
-    def revoke(self, connection=None):
+    def revoke(self, connection=None, terminate=False, signal=None):
         """Send revoke signal to all workers.
 
         Any worker receiving the task, or having reserved the
         task, *must* ignore it.
 
+        :keyword terminate: Also terminate the process currently working
+            on the task (if any).
+        :keyword signal: Name of signal to send to process if terminate.
+            Default is TERM.
+
         """
-        self.app.control.revoke(self.id, connection=connection)
+        self.app.control.revoke(self.id, connection=connection,
+                                terminate=terminate, signal=signal)
 
     def get(self, timeout=None, propagate=True, interval=0.5):
         """Wait until task is ready, and return its result.
@@ -143,7 +149,7 @@ class AsyncResult(ResultBase):
             [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
 
         """
-        for _, R in self.iterdeps():
+        for _, R in self.iterdeps(intermediate=intermediate):
             yield R, R.get(**kwargs)
 
     def get_leaf(self):
@@ -198,7 +204,7 @@ class AsyncResult(ResultBase):
         return hash(self.id)
 
     def __repr__(self):
-        return '<%s: %s>' % (self.__class__.__name__, self.id)
+        return '<{0}: {1}>'.format(type(self).__name__, self.id)
 
     def __eq__(self, other):
         if isinstance(other, AsyncResult):
@@ -229,7 +235,7 @@ class AsyncResult(ResultBase):
     def children(self):
         children = self.backend.get_children(self.id)
         if children:
-            return map(from_serializable, children)
+            return [from_serializable(child) for child in children]
 
     @property
     def result(self):
@@ -277,12 +283,14 @@ class AsyncResult(ResultBase):
         return self.backend.get_status(self.id)
     status = state
 
-    def _get_task_id(self):
+    @property
+    def task_id(self):
+        """compat alias to :attr:`id`"""
         return self.id
 
-    def _set_task_id(self, id):
+    @task_id.setter  # noqa
+    def task_id(self, id):
         self.id = id
-    task_id = property(_get_task_id, _set_task_id)
 BaseAsyncResult = AsyncResult  # for backwards compatibility.
 
 
@@ -394,7 +402,7 @@ class ResultSet(ResultBase):
 
     def revoke(self, connection=None):
         """Revoke all tasks in the set."""
-        with self.app.default_connection(connection) as conn:
+        with self.app.connection_or_acquire(connection) as conn:
             for result in self.results:
                 result.revoke(connection=conn)
 
@@ -431,7 +439,7 @@ class ResultSet(ResultBase):
             time.sleep(interval)
             elapsed += interval
             if timeout and elapsed >= timeout:
-                raise TimeoutError("The operation timed out")
+                raise TimeoutError('The operation timed out')
 
     def get(self, timeout=None, propagate=True, interval=0.5):
         """See :meth:`join`
@@ -535,8 +543,8 @@ class ResultSet(ResultBase):
         return NotImplemented
 
     def __repr__(self):
-        return '<%s: [%s]>' % (self.__class__.__name__,
-                               ', '.join(r.id for r in self.results))
+        return '<{0}: [{1}]>'.format(type(self).__name__,
+                                     ', '.join(r.id for r in self.results))
 
     @property
     def subtasks(self):
@@ -599,11 +607,15 @@ class GroupResult(ResultSet):
         return NotImplemented
 
     def __repr__(self):
-        return '<%s: %s [%s]>' % (self.__class__.__name__, self.id,
-                                  ', '.join(r.id for r in self.results))
+        return '<{0}: {1} [{2}]>'.format(type(self).__name__, self.id,
+                                         ', '.join(r.id for r in self.results))
 
     def serializable(self):
         return self.id, [r.serializable() for r in self.results]
+
+    @property
+    def children(self):
+        return self.results
 
     @classmethod
     def restore(self, id, backend=None):
@@ -630,16 +642,19 @@ class TaskSetResult(GroupResult):
         """Deprecated: Use ``len(r)``."""
         return len(self)
 
-    def _get_taskset_id(self):
+    @property
+    def taskset_id(self):
+        """compat alias to :attr:`self.id`"""
         return self.id
 
-    def _set_taskset_id(self, id):
+    @taskset_id.setter  # noqa
+    def taskset_id(self, id):
         self.id = id
-    taskset_id = property(_get_taskset_id, _set_taskset_id)
 
 
 class EagerResult(AsyncResult):
     """Result that we know has already been executed."""
+    task_name = None
 
     def __init__(self, id, ret_value, state, traceback=None):
         self.id = id
@@ -676,7 +691,7 @@ class EagerResult(AsyncResult):
         self._state = states.REVOKED
 
     def __repr__(self):
-        return "<EagerResult: %s>" % self.id
+        return '<EagerResult: {0.id}>'.format(self)
 
     @property
     def result(self):

@@ -8,10 +8,10 @@
 """
 from __future__ import absolute_import
 
+from kombu.utils import cached_property
 from kombu.utils.url import _parse_url
 
 from celery.exceptions import ImproperlyConfigured
-from celery.utils import cached_property
 
 from .base import KeyValueStoreBackend
 
@@ -58,9 +58,9 @@ class RedisBackend(KeyValueStoreBackend):
 
         # For compatibility with the old REDIS_* configuration keys.
         def _get(key):
-            for prefix in 'CELERY_REDIS_%s', 'REDIS_%s':
+            for prefix in 'CELERY_REDIS_{0}', 'REDIS_{0}':
                 try:
-                    return conf[prefix % key]
+                    return conf[prefix.format(key)]
                 except KeyError:
                     pass
         if host and '://' in host:

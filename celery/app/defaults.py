@@ -58,7 +58,8 @@ class Option(object):
         return self.typemap[self.type](value)
 
     def __repr__(self):
-        return '<Option: type->%s default->%r>' % (self.type, self.default)
+        return '<Option: type->{0} default->{1!r}>'.format(self.type,
+                                                           self.default)
 
 
 NAMESPACES = {
@@ -67,9 +68,8 @@ NAMESPACES = {
         'CONNECTION_TIMEOUT': Option(4, type='float'),
         'CONNECTION_RETRY': Option(True, type='bool'),
         'CONNECTION_MAX_RETRIES': Option(100, type='int'),
+        'HEARTBEAT': Option(10, type='int'),
         'POOL_LIMIT': Option(10, type='int'),
-        'INSIST': Option(False, type='bool',
-                         deprecate_by='2.4', remove_by='4.0'),
         'USE_SSL': Option(False, type='bool'),
         'TRANSPORT': Option(type='string'),
         'TRANSPORT_OPTIONS': Option({}, type='dict'),
@@ -90,11 +90,6 @@ NAMESPACES = {
     'CELERY': {
         'ACKS_LATE': Option(False, type='bool'),
         'ALWAYS_EAGER': Option(False, type='bool'),
-        'AMQP_TASK_RESULT_EXPIRES': Option(type='float',
-                deprecate_by='2.5', remove_by='4.0',
-                alt='CELERY_TASK_RESULT_EXPIRES'),
-        'AMQP_TASK_RESULT_CONNECTION_MAX': Option(1, type='int',
-                remove_by='2.5', alt='BROKER_POOL_LIMIT'),
         'ANNOTATIONS': Option(type='any'),
         'BROADCAST_QUEUE': Option('celeryctl'),
         'BROADCAST_EXCHANGE': Option('celeryctl'),
@@ -136,8 +131,6 @@ NAMESPACES = {
         'SEND_TASK_ERROR_EMAILS': Option(False, type='bool'),
         'SEND_TASK_SENT_EVENT': Option(False, type='bool'),
         'STORE_ERRORS_EVEN_IF_IGNORED': Option(False, type='bool'),
-        'TASK_ERROR_WHITELIST': Option((), type='tuple',
-            deprecate_by='2.5', remove_by='4.0'),
         'TASK_PUBLISH_RETRY': Option(True, type='bool'),
         'TASK_PUBLISH_RETRY_POLICY': Option({
                 'max_retries': 100,
@@ -154,6 +147,7 @@ NAMESPACES = {
         'SECURITY_KEY': Option(type='string'),
         'SECURITY_CERTIFICATE': Option(type='string'),
         'SECURITY_CERT_STORE': Option(type='string'),
+        'WORKER_DIRECT': Option(False, type='bool'),
     },
     'CELERYD': {
         'AUTOSCALER': Option('celery.worker.autoscale.Autoscaler'),
@@ -175,6 +169,7 @@ NAMESPACES = {
         'MAX_TASKS_PER_CHILD': Option(type='int'),
         'POOL': Option(DEFAULT_POOL),
         'POOL_PUTLOCKS': Option(True, type='bool'),
+        'POOL_RESTARTS': Option(False, type='bool'),
         'PREFETCH_MULTIPLIER': Option(4, type='int'),
         'STATE_DB': Option(),
         'TASK_LOG_FORMAT': Option(DEFAULT_TASK_LOG_FMT),
@@ -229,7 +224,7 @@ def find_deprecated_settings(source):
     from celery.utils import warn_deprecated
     for name, opt in flatten(NAMESPACES):
         if (opt.deprecate_by or opt.remove_by) and getattr(source, name, None):
-            warn_deprecated(description='The %r setting' % (name, ),
+            warn_deprecated(description='The {0!r} setting'.format(name),
                             deprecation=opt.deprecate_by,
                             removal=opt.remove_by,
                             alternative=opt.alt)

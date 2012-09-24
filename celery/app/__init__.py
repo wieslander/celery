@@ -7,10 +7,6 @@
 
 """
 from __future__ import absolute_import
-from __future__ import with_statement
-print("LOADING APP")
-import traceback
-traceback.print_stack()
 
 import os
 

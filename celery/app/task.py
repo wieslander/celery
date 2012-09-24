@@ -7,7 +7,8 @@
 
 """
 from __future__ import absolute_import
-from __future__ import with_statement
+
+import sys
 
 from celery import current_app
 from celery import states
@@ -22,13 +23,14 @@ from celery.utils.imports import instantiate
 from celery.utils.mail import ErrorMail
 
 from .annotations import resolve_all as resolve_all_annotations
-from .registry import _unpickle_task
+from .registry import _unpickle_task_v2
 
 #: extracts attributes related to publishing a message from an object.
 extract_exec_options = mattrgetter(
     'queue', 'routing_key', 'exchange',
     'immediate', 'mandatory', 'priority', 'expires',
     'serializer', 'delivery_mode', 'compression',
+    'timeout', 'soft_timeout',
 )
 
 
@@ -41,15 +43,20 @@ class Context(object):
     args = None
     kwargs = None
     retries = 0
+    eta = None
+    expires = None
     is_eager = False
     delivery_info = None
     taskset = None   # compat alias to group
     group = None
     chord = None
+    utc = None
     called_directly = True
     callbacks = None
     errbacks = None
+    timeouts = None
     _children = None   # see property
+    _protected = 0
 
     def __init__(self, *args, **kwargs):
         self.update(*args, **kwargs)
@@ -67,7 +74,7 @@ class Context(object):
             return default
 
     def __repr__(self):
-        return '<Context: %r>' % (vars(self, ))
+        return '<Context: {0!r}>'.format(vars(self))
 
     @property
     def children(self):
@@ -120,9 +127,8 @@ class TaskType(type):
         return instance.__class__
 
     def __repr__(cls):
-        if cls._app:
-            return '<class %s of %s>' % (cls.__name__, cls._app, )
-        return '<unbound %s>' % (cls.__name__, )
+        return ('<class {0.__name__} of {0._app}>' if cls._app
+           else '<unbound {0.__name__}>').format(cls)
 
 
 class Task(object):
@@ -156,7 +162,7 @@ class Task(object):
 
     #: If disabled the worker will not forward magic keyword arguments.
     #: Deprecated and scheduled for removal in v4.0.
-    accept_magic_kwargs = None
+    accept_magic_kwargs = False
 
     #: Maximum number of retries before giving up.  If set to :const:`None`,
     #: it will **never** stop retrying.
@@ -174,15 +180,15 @@ class Task(object):
     #: If enabled the worker will not store task state and return values
     #: for this task.  Defaults to the :setting:`CELERY_IGNORE_RESULT`
     #: setting.
-    ignore_result = False
+    ignore_result = None
 
     #: When enabled errors will be stored even if the task is otherwise
     #: configured to ignore results.
-    store_errors_even_if_ignored = False
+    store_errors_even_if_ignored = None
 
     #: If enabled an email will be sent to :setting:`ADMINS` whenever a task
     #: of this type fails.
-    send_error_emails = False
+    send_error_emails = None
 
     #: The name of a serializer that are registered with
     #: :mod:`kombu.serialization.registry`.  Default is `'pickle'`.
@@ -213,7 +219,7 @@ class Task(object):
     #:
     #: The application default can be overridden using the
     #: :setting:`CELERY_TRACK_STARTED` setting.
-    track_started = False
+    track_started = None
 
     #: When enabled messages for this task will be acknowledged **after**
     #: the task has been executed, and not *just before* which is the
@@ -257,7 +263,6 @@ class Task(object):
         for attr_name, config_name in self.from_config:
             if getattr(self, attr_name, None) is None:
                 setattr(self, attr_name, conf[config_name])
-        self.accept_magic_kwargs = app.accept_magic_kwargs
         if self.accept_magic_kwargs is None:
             self.accept_magic_kwargs = app.accept_magic_kwargs
         if self.backend is None:
@@ -267,9 +272,9 @@ class Task(object):
         if not was_bound:
             self.annotate()
 
-        from celery.utils.threads import LocalStack
-        self.request_stack = LocalStack()
-        self.request_stack.push(Context())
+            from celery.utils.threads import LocalStack
+            self.request_stack = LocalStack()
+            self.request_stack.push(Context())
 
         # PeriodicTask uses this to add itself to the PeriodicTask schedule.
         self.on_bound(app)
@@ -318,10 +323,15 @@ class Task(object):
             self.pop_request()
             _task_stack.pop()
 
-    # - tasks are pickled into the name of the task only, and the reciever
-    # - simply grabs it from the local registry.
     def __reduce__(self):
-        return (_unpickle_task, (self.name, ), None)
+        # - tasks are pickled into the name of the task only, and the reciever
+        # - simply grabs it from the local registry.
+        # - in later versions the module of the task is also included,
+        # - and the receiving side tries to import that module so that
+        # - it will work even if the task has not been registered.
+        mod = type(self).__module__
+        mod = mod if mod and mod in sys.modules else None
+        return (_unpickle_task_v2, (self.name, mod), None)
 
     def run(self, *args, **kwargs):
         """The body of the task executed by workers."""
@@ -456,7 +466,7 @@ class Task(object):
 
         if connection:
             producer = app.amqp.TaskProducer(connection)
-        with app.default_producer(producer) as P:
+        with app.producer_or_acquire(producer) as P:
             evd = None
             if conf.CELERY_SEND_TASK_SENT_EVENT:
                 evd = app.events.Dispatcher(channel=P.channel,
@@ -488,6 +498,8 @@ class Task(object):
         :keyword eta: Explicit time and date to run the retry at
                       (must be a :class:`~datetime.datetime` instance).
         :keyword max_retries: If set, overrides the default retry limit.
+        :keyword timeout: If set, overrides the default timeout.
+        :keyword soft_timeout: If set, overrides the default soft timeout.
         :keyword \*\*options: Any extra options to pass on to
                               meth:`apply_async`.
         :keyword throw: If this is :const:`False`, do not raise the
@@ -511,7 +523,7 @@ class Task(object):
             ...     twitter = Twitter(oauth=auth)
             ...     try:
             ...         twitter.post_status_update(message)
-            ...     except twitter.FailWhale, exc:
+            ...     except twitter.FailWhale as exc:
             ...         # Retry in 5 minutes.
             ...         raise tweet.retry(countdown=60 * 5, exc=exc)
 
@@ -535,6 +547,7 @@ class Task(object):
         if delivery_info:
             options.setdefault('exchange', delivery_info.get('exchange'))
             options.setdefault('routing_key', delivery_info.get('routing_key'))
+        options.setdefault('expires', request.expires)
 
         if not eta and countdown is None:
             countdown = self.default_retry_delay
@@ -542,13 +555,15 @@ class Task(object):
         options.update({'retries': request.retries + 1,
                         'task_id': request.id,
                         'countdown': countdown,
-                        'eta': eta})
+                        'eta': eta,
+                        'link': request.callbacks,
+                        'link_error': request.errbacks})
 
         if max_retries is not None and options['retries'] > max_retries:
             if exc:
                 maybe_reraise()
             raise self.MaxRetriesExceededError(
-                    """Can't retry %s[%s] args:%s kwargs:%s""" % (
+                    "Can't retry {0}[{1}] args:{2} kwargs:{3}".format(
                         self.name, options['task_id'], args, kwargs))
 
         # If task was executed eagerly using apply(),
@@ -766,7 +781,7 @@ class Task(object):
 
     def __repr__(self):
         """`repr(task)`"""
-        return '<@task: %s>' % (self.name, )
+        return '<@task: {0.name}>'.format(self)
 
     @property
     def request(self):

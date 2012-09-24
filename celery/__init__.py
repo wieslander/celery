@@ -14,9 +14,31 @@ __author__ = 'Ask Solem'
 __contact__ = 'ask@celeryproject.org'
 __homepage__ = 'http://celeryproject.org'
 __docformat__ = 'restructuredtext'
-VERSION_BANNER = '%s (%s)' % (__version__, SERIES)
+__all__ = [
+    'celery', 'bugreport', 'shared_task', 'task',
+    'current_app', 'current_task',
+    'chain', 'chord', 'chunks', 'group', 'subtask',
+    'xmap', 'xstarmap', 'uuid', 'version', '__version__',
+]
+VERSION_BANNER = '{0} ({1})'.format(__version__, SERIES)
 
 # -eof meta-
+
+# This is for static analyzers
+Celery = object
+bugreport = lambda *a, **kw: None
+shared_task = lambda *a, **kw: None
+Task = object
+current_app = object()
+current_task = object()
+chain = lambda *a, **kw: None
+chord = lambda *a, **kw: None
+chunks = lambda *a, **kw: None
+group = lambda *a, **kw: None
+subtask = lambda *a, **kw: None
+xmap = lambda *a, **kw: None
+xstarmap = lambda *a, **kw: None
+uuid = lambda: None
 
 # Lazy loading
 from .__compat__ import recreate_module

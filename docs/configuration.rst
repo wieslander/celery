@@ -67,22 +67,10 @@ CELERY_TIMEZONE
 
 Configure Celery to use a custom time zone.
 The timezone value can be any time zone supported by the :mod:`pytz`
-library.  :mod:`pytz` must be installed for the selected zone
-to be used.
+library.
 
-If not set then the systems default local time zone is used.
-
-.. warning::
-
-    Celery requires the :mod:`pytz` library to be installed,
-    when using custom time zones (other than UTC).  You can
-    install it using :program:`pip` or :program:`easy_install`::
-
-        $ pip install pytz
-
-    Pytz is a library that defines the timzones of the world,
-    it changes quite frequently so it is not included in the Python Standard
-    Library.
+If not set then the UTC timezone is used if :setting:`CELERY_ENABLE_UTC` is
+enabled, otherwise it falls back to the local timezone.
 
 .. _conf-tasks:
 
@@ -119,7 +107,7 @@ You can change methods too, for example the ``on_failure`` handler:
 .. code-block:: python
 
     def my_on_failure(self, exc, task_id, args, kwargs, einfo):
-        print("Oh no! Task failed: %r" % (exc, ))
+        print("Oh no! Task failed: {0!r}".format(exc))
 
     CELERY_ANNOTATIONS = {"*": {"on_failure": my_on_failure}}
 
@@ -404,7 +392,9 @@ Configuring the backend URL
     The Redis backend requires the :mod:`redis` library:
     http://pypi.python.org/pypi/redis/
 
-    To install the redis package use `pip` or `easy_install`::
+    To install the redis package use `pip` or `easy_install`:
+
+    .. code-block:: bash
 
         $ pip install redis
 
@@ -509,7 +499,9 @@ Cassandra backend settings
     The Cassandra backend requires the :mod:`pycassa` library:
     http://pypi.python.org/pypi/pycassa/
 
-    To install the pycassa package use `pip` or `easy_install`::
+    To install the pycassa package use `pip` or `easy_install`:
+
+    .. code-block:: bash
 
         $ pip install pycassa
 
@@ -604,6 +596,32 @@ CELERY_ROUTES
 A list of routers, or a single router used to route tasks to queues.
 When deciding the final destination of a task the routers are consulted
 in order.  See :ref:`routers` for more information.
+
+.. setting:: CELERY_WORKER_DIRECT
+
+CELERY_WORKER_DIRECT
+~~~~~~~~~~~~~~~~~~~~
+
+This option enables so that every worker has a dedicated queue,
+so that tasks can be routed to specific workers.
+
+The queue name for each worker is automatically generated based on
+the worker hostname and a ``.dq`` suffix, using the ``C.dq`` exchange.
+
+For example the queue name for the worker with hostname ``w1.example.com``
+becomes::
+
+    w1.example.com.dq
+
+Then you can route the task to the task by specifying the hostname
+as the routung key and the ``C.dq`` exchange::
+
+    CELERY_ROUTES = {
+        'tasks.add': {'exchange': 'C.dq', 'routing_key': 'w1.example.com'}
+    }
+
+This setting is mandatory if you want to use the ``move_to_worker`` features
+of :mod:`celery.contrib.migrate`.
 
 .. setting:: CELERY_CREATE_MISSING_QUEUES
 
@@ -702,6 +720,28 @@ default is ``amqp``, but there are many other choices including
 It can also be a fully qualified path to your own transport implementation.
 
 See the Kombu documentation for more information about broker URLs.
+
+.. setting:: BROKER_HEARTBEAT
+
+BROKER_HEARTBEAT
+~~~~~~~~~~~~~~~~
+:transports supported: ``pyamqp``
+
+It's not always possible to detect connection loss in a timely
+manner using TCP/IP alone, so AMQP defines something called heartbeats
+that's is used both by the client and the broker to detect if
+a connection was closed.
+
+Heartbeats are currently only supported by the ``pyamqp://`` transport,
+and this requires the :mod:`amqp` module:
+
+.. code-block:: bash
+
+    $ pip install amqp
+
+The default heartbeat value is 10 seconds,
+the heartbeat will then be monitored at double the rate of the heartbeat value
+(so for the default 10 seconds, the heartbeat is checked every 5 seconds).
 
 .. setting:: BROKER_USE_SSL
 
@@ -890,7 +930,7 @@ Decides if publishing task messages will be retried in the case
 of connection loss or other connection errors.
 See also :setting:`CELERY_TASK_PUBLISH_RETRY_POLICY`.
 
-Disabled by default.
+Enabled by default.
 
 .. setting:: CELERY_TASK_PUBLISH_RETRY_POLICY
 
@@ -1019,7 +1059,7 @@ Example:
 
     from celery.exceptions import SoftTimeLimitExceeded
 
-    @celery.task()
+    @celery.task
     def mytask():
         try:
             return do_work()
@@ -1191,7 +1231,7 @@ CELERY_SEND_TASK_SENT_EVENT
 
 .. versionadded:: 2.2
 
-If enabled, a `task-sent` event will be sent for every task so tasks can be
+If enabled, a :event:`task-sent` event will be sent for every task so tasks can be
 tracked before they are consumed by a worker.
 
 Disabled by default.
@@ -1382,6 +1422,16 @@ You can use a custom pool class name, or select one of
 the built-in aliases: ``processes``, ``eventlet``, ``gevent``.
 
 Default is ``processes``.
+
+.. setting:: CELERYD_POOL_RESTARTS
+
+CELERYD_POOL_RESTARTS
+~~~~~~~~~~~~~~~~~~~~~
+
+If enabled the worker pool can be restarted using the
+:control:`pool_restart` remote control command.
+
+Disabled by default.
 
 .. setting:: CELERYD_AUTOSCALER
 

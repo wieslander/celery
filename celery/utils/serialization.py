@@ -9,45 +9,21 @@
 from __future__ import absolute_import
 
 import inspect
-import sys
-import types
 
-import pickle as pypickle
 try:
-    import cPickle as cpickle
+    import cPickle as pickle
 except ImportError:
-    cpickle = None  # noqa
+    import pickle  # noqa
 
 from .encoding import safe_repr
 
 
-if sys.version_info < (2, 6):  # pragma: no cover
-    # cPickle is broken in Python <= 2.6.
-    # It unsafely and incorrectly uses relative instead of absolute imports,
-    # so e.g.:
-    #       exceptions.KeyError
-    # becomes:
-    #       celery.exceptions.KeyError
-    #
-    # Your best choice is to upgrade to Python 2.6,
-    # as while the pure pickle version has worse performance,
-    # it is the only safe option for older Python versions.
-    pickle = pypickle
-else:
-    pickle = cpickle or pypickle
-
 #: List of base classes we probably don't want to reduce to.
 unwanted_base_classes = (StandardError, Exception, BaseException, object)
 
-if sys.version_info < (2, 5):  # pragma: no cover
 
-    # Prior to Python 2.5, Exception was an old-style class
-    def subclass_exception(name, parent, unused):
-        return types.ClassType(name, (parent,), {})
-else:
-
-    def subclass_exception(name, parent, module):  # noqa
-        return type(name, (parent,), {'__module__': module})
+def subclass_exception(name, parent, module):  # noqa
+    return type(name, (parent,), {'__module__': module})
 
 
 def find_nearest_pickleable_exception(exc):
@@ -84,7 +60,7 @@ def find_nearest_pickleable_exception(exc):
         try:
             exc_args = getattr(exc, 'args', [])
             superexc = supercls(*exc_args)
-            pickle.dumps(superexc)
+            pickle.loads(pickle.dumps(superexc))
         except:
             pass
         else:
@@ -111,7 +87,7 @@ class UnpickleableExceptionWrapper(Exception):
 
         >>> try:
         ...     something_raising_unpickleable_exc()
-        >>> except Exception, e:
+        >>> except Exception as e:
         ...     exc = UnpickleableException(e.__class__.__module__,
         ...                                 e.__class__.__name__,
         ...                                 e.args)
@@ -159,15 +135,16 @@ class UnpickleableExceptionWrapper(Exception):
 
 def get_pickleable_exception(exc):
     """Make sure exception is pickleable."""
+    try:
+        pickle.loads(pickle.dumps(exc))
+    except Exception:
+        pass
+    else:
+        return exc
     nearest = find_nearest_pickleable_exception(exc)
     if nearest:
         return nearest
-
-    try:
-        pickle.dumps(exc)
-    except Exception:
-        return UnpickleableExceptionWrapper.from_exception(exc)
-    return exc
+    return UnpickleableExceptionWrapper.from_exception(exc)
 
 
 def get_pickled_exception(exc):

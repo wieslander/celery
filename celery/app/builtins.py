@@ -8,10 +8,9 @@
 
 """
 from __future__ import absolute_import
-from __future__ import with_statement
 
 from collections import deque
-from itertools import starmap
+from itertools import imap, izip, starmap
 
 from celery._state import get_current_worker_task
 from celery.utils import uuid
@@ -70,10 +69,13 @@ def add_unlock_chord_task(app):
     from celery.canvas import subtask
     from celery import result as _res
 
-    @app.task(name='celery.chord_unlock', max_retries=None)
-    def unlock_chord(group_id, callback, interval=1, propagate=False,
-            max_retries=None, result=None):
-        result = _res.GroupResult(group_id, map(_res.AsyncResult, result))
+    @app.task(name='celery.chord_unlock', max_retries=None,
+              default_retry_delay=1, ignore_result=True)
+    def unlock_chord(group_id, callback, interval=None, propagate=False,
+            max_retries=None, result=None, Result=_res.AsyncResult):
+        if interval is None:
+            interval = unlock_chord.default_retry_delay
+        result = _res.GroupResult(group_id, [Result(r) for r in result])
         j = result.join_native if result.supports_native_join else result.join
         if result.ready():
             subtask(callback).delay(j(propagate=propagate))
@@ -89,7 +91,7 @@ def add_map_task(app):
     @app.task(name='celery.map')
     def xmap(task, it):
         task = subtask(task).type
-        return list(map(task, it))
+        return list(imap(task, it))
     return xmap
 
 
@@ -134,7 +136,7 @@ def add_group_task(app):
             if self.request.is_eager or app.conf.CELERY_ALWAYS_EAGER:
                 return app.GroupResult(result.id,
                         [task.apply(group_id=group_id) for task in taskit])
-            with app.default_producer() as pub:
+            with app.producer_or_acquire() as pub:
                 [task.apply_async(group_id=group_id, publisher=pub,
                                   add_to_parent=False) for task in taskit]
             parent = get_current_worker_task()
@@ -143,6 +145,7 @@ def add_group_task(app):
             return result
 
         def prepare(self, options, tasks, args, **kwargs):
+            AsyncResult = self.AsyncResult
             options['group_id'] = group_id = \
                     options.setdefault('task_id', uuid())
 
@@ -154,11 +157,14 @@ def add_group_task(app):
                     tid = opts['task_id']
                 except KeyError:
                     tid = opts['task_id'] = uuid()
-                return task, self.AsyncResult(tid)
+                return task, AsyncResult(tid)
 
-            tasks, results = zip(*[prepare_member(task) for task in tasks])
-            return (tasks, self.app.GroupResult(group_id, results),
-                    group_id, args)
+            try:
+                tasks, res = list(izip(*[prepare_member(task)
+                                                for task in tasks]))
+            except ValueError:  # tasks empty
+                tasks, res = [], []
+            return (tasks, self.app.GroupResult(group_id, res), group_id, args)
 
         def apply_async(self, partial_args=(), kwargs={}, **options):
             if self.app.conf.CELERY_ALWAYS_EAGER:
@@ -207,16 +213,17 @@ def add_chain_task(app):
                         next_step = steps.popleft()
                     except IndexError:
                         next_step = None
-                if next_step is not None:
-                    task = chord(task, body=next_step, task_id=tid)
+                    if next_step is not None:
+                        task = chord(task, body=next_step, task_id=tid)
                 if prev_task:
                     # link previous task to this task.
                     prev_task.link(task)
                     # set the results parent attribute.
                     res.parent = prev_res
 
-                results.append(res)
-                tasks.append(task)
+                if not isinstance(prev_task, chord):
+                    results.append(res)
+                    tasks.append(task)
                 prev_task, prev_res = task, res
 
             return tasks, results
@@ -238,13 +245,12 @@ def add_chain_task(app):
             tasks[0].apply_async()
             return result
 
-        def apply(self, args=(), kwargs={}, **options):
-            tasks = [maybe_subtask(task).clone() for task in kwargs['tasks']]
-            res = prev = None
-            for task in tasks:
-                res = task.apply((prev.get(), ) if prev else ())
-                res.parent, prev = prev, res
-            return res
+        def apply(self, args=(), kwargs={}, subtask=maybe_subtask, **options):
+            last, fargs = None, args  # fargs passed to first task only
+            for task in kwargs['tasks']:
+                res = subtask(task).clone(fargs).apply(last and (last.get(), ))
+                res.parent, last, fargs = last, res, None
+            return last
     return Chain
 
 
@@ -270,8 +276,8 @@ def add_chord_task(app):
             prepare_member = self._prepare_member
 
             # - convert back to group if serialized
-            if not isinstance(header, group):
-                header = group(map(maybe_subtask, header))
+            tasks = header.tasks if isinstance(header, group) else header
+            header = group([maybe_subtask(s).clone() for s in tasks])
             # - eager applies the group inline
             if eager:
                 return header.apply(args=partial_args, task_id=group_id)
@@ -286,8 +292,7 @@ def add_chord_task(app):
                                        propagate=propagate,
                                        result=results)
             # - call the header group, returning the GroupResult.
-            # XXX Python 2.5 doesn't allow kwargs after star-args.
-            return header(*partial_args, **{'task_id': group_id})
+            return header(*partial_args, task_id=group_id)
 
         def _prepare_member(self, task, body, group_id):
             opts = task.options
@@ -304,15 +309,17 @@ def add_chord_task(app):
                 return self.apply(args, kwargs, **options)
             group_id = options.pop('group_id', None)
             chord = options.pop('chord', None)
-            header, body = (list(maybe_subtask(kwargs['header'])),
-                            maybe_subtask(kwargs['body']))
+            header = kwargs.pop('header')
+            body = kwargs.pop('body')
+            header, body = (list(maybe_subtask(header)),
+                            maybe_subtask(body))
             if group_id:
                 body.set(group_id=group_id)
             if chord:
                 body.set(chord=chord)
             callback_id = body.options.setdefault('task_id', task_id or uuid())
             parent = super(Chord, self).apply_async((header, body, args),
-                                                    **options)
+                                                     kwargs, **options)
             body_result = self.AsyncResult(callback_id)
             body_result.parent = parent
             return body_result

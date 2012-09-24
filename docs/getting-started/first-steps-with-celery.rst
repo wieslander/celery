@@ -54,7 +54,9 @@ Detailed information about using RabbitMQ with Celery:
 .. _`RabbitMQ`: http://www.rabbitmq.com/
 
 If you are using Ubuntu or Debian install RabbitMQ by executing this
-command::
+command:
+
+.. code-block:: bash
 
     $ sudo apt-get install rabbitmq-server
 
@@ -111,7 +113,9 @@ Installing Celery
 =================
 
 Celery is on the Python Package Index (PyPI), so it can be installed
-with standard Python tools like ``pip`` or ``easy_install``::
+with standard Python tools like ``pip`` or ``easy_install``:
+
+.. code-block:: bash
 
     $ pip install celery
 
@@ -123,7 +127,7 @@ application or just app in short.  Since this instance is used as
 the entry-point for everything you want to do in Celery, like creating tasks and
 managing workers, it must be possible for other modules to import it.
 
-In this tutorial we will keep everything contained in a single module,
+In this tutorial you will keep everything contained in a single module,
 but for larger projects you want to create
 a :ref:`dedicated module <project-layout>`.
 
@@ -142,23 +146,22 @@ Let's create the file :file:`tasks.py`:
 The first argument to :class:`~celery.app.Celery` is the name of the current module,
 this is needed so that names can be automatically generated, the second
 argument is the broker keyword argument which specifies the URL of the
-message broker we want to use.
-
-The broker argument specifies the URL of the broker we want to use,
-we use RabbitMQ here, which is already the default option,
-but see :ref:`celerytut-broker` above if you want to use something different,
+message broker you want to use, using RabbitMQ here, which is already the
+default option.  See :ref:`celerytut-broker` above for more choices,
 e.g. for Redis you can use ``redis://localhost``, or MongoDB:
 ``mongodb://localhost``.
 
-We defined a single task, called ``add``, which returns the sum of two numbers.
+You defined a single task, called ``add``, which returns the sum of two numbers.
 
 .. _celerytut-running-celeryd:
 
 Running the celery worker server
 ================================
 
-We now run the worker by executing our program with the ``worker``
-argument::
+You now run the worker by executing our program with the ``worker``
+argument:
+
+.. code-block:: bash
 
     $ celery -A tasks worker --loglevel=info
 
@@ -167,11 +170,15 @@ background as a daemon.  To do this you need to use the tools provided
 by your platform, or something like `supervisord`_ (see :ref:`daemonizing`
 for more information).
 
-For a complete listing of the command line options available, do::
+For a complete listing of the command line options available, do:
+
+.. code-block:: bash
 
     $  celery worker --help
 
-There also several other commands available, and help is also available::
+There also several other commands available, and help is also available:
+
+.. code-block:: bash
 
     $ celery help
 
@@ -182,7 +189,7 @@ There also several other commands available, and help is also available::
 Calling the task
 ================
 
-To call our task we can use the :meth:`~@Task.delay` method.
+To call our task you can use the :meth:`~@Task.delay` method.
 
 This is a handy shortcut to the :meth:`~@Task.apply_async`
 method which gives greater control of the task execution (see
@@ -215,7 +222,7 @@ built-in result backends to choose from: `SQLAlchemy`_/`Django`_ ORM,
 .. _`SQLAlchemy`: http://www.sqlalchemy.org/
 .. _`Django`: http://djangoproject.com
 
-For this example we will use the `amqp` result backend, which sends states
+For this example you will use the `amqp` result backend, which sends states
 as messages.  The backend is specified via the ``backend`` argument to
 :class:`@Celery`, (or via the :setting:`CELERY_RESULT_BACKEND` setting if
 you choose to use a configuration module)::
@@ -230,7 +237,7 @@ the message broker (a popular combination)::
 To read more about result backends please see :ref:`task-result-backends`.
 
 Now with the result backend configured, let's call the task again.
-This time we'll hold on to the :class:`~@AsyncResult` instance returned
+This time you'll hold on to the :class:`~@AsyncResult` instance returned
 when you call a task::
 
     >>> result = add.delay(4, 4)
@@ -241,20 +248,20 @@ has finished processing or not::
     >>> result.ready()
     False
 
-We can wait for the result to complete, but this is rarely used
+You can wait for the result to complete, but this is rarely used
 since it turns the asynchronous call into a synchronous one::
 
     >>> result.get(timeout=1)
     4
 
 In case the task raised an exception, :meth:`~@AsyncResult.get` will
-re-raise the exception, but you can override this by specyfing
+re-raise the exception, but you can override this by specifying
 the ``propagate`` argument::
 
     >>> result.get(propagate=True)
 
 
-If the task raised an exception we can also gain access to the
+If the task raised an exception you can also gain access to the
 original traceback::
 
     >>> result.traceback
@@ -270,12 +277,13 @@ Configuration
 Celery, like a consumer appliance doesn't need much to be operated.
 It has an input and an output, where you must connect the input to a broker and maybe
 the output to a result backend if so wanted.  But if you look closely at the back
-there is a lid revealing lots of sliders, dials and buttons: this is the configuration.
+there's a lid revealing loads of sliders, dials and buttons: this is the configuration.
 
-The default configuration should be good enough for most uses, but there
-are many things to tweak so that Celery works just the way you want it to.
+The default configuration should be good enough for most uses, but there's
+many things to tweak so Celery works just the way you want it to.
 Reading about the options available is a good idea to get familiar with what
-can be configured, see the :ref:`configuration` reference.
+can be configured. You can read about the options in the the
+:ref:`configuration` reference.
 
 The configuration can be set on the app directly or by using a dedicated
 configuration module.
@@ -331,7 +339,9 @@ current directory or on the Python path, it could look like this:
     CELERY_ENABLE_UTC = True
 
 To verify that your configuration file works properly, and doesn't
-contain any syntax errors, you can try to import it::
+contain any syntax errors, you can try to import it:
+
+.. code-block:: bash
 
     $ python -m celeryconfig
 
@@ -362,7 +372,9 @@ instead, so that only 10 tasks of this type can be processed in a minute
 
 If you are using RabbitMQ, Redis or MongoDB as the
 broker then you can also direct the workers to set a new rate limit
-for the task at runtime::
+for the task at runtime:
+
+.. code-block:: bash
 
     $ celery control rate_limit tasks.add 10/m
     worker.example.com: OK

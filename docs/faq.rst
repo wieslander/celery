@@ -98,17 +98,16 @@ Billiard is a fork of the Python multiprocessing module containing
 many performance and stability improvements.  It is an eventual goal
 that these improvements will be merged back into Python one day.
 
-It is also used for compatibility with older Python versions.
+It is also used for compatibility with older Python versions
+that doesn't come with the multiprocessing module.
 
 .. _`billiard`: http://pypi.python.org/pypi/billiard
 
-- `python-dateutil`_
+- `pytz`
 
-The dateutil module is used by Celery to parse ISO-8601 formatted time strings,
-as well as its ``relativedelta`` class which is used in the implementation
-of crontab style periodic tasks.
+The pytz module provides timezone definitions and related tools.
 
-.. _`python-dateutil`: http://pypi.python.org/pypi/python-dateutil
+.. _`pytz`: http://pypi.python.org/pypi/pytz
 
 django-celery
 ~~~~~~~~~~~~~
@@ -315,7 +314,9 @@ Why aren't my tasks processed?
 ------------------------------
 
 **Answer:** With RabbitMQ you can see how many consumers are currently
-receiving tasks by running the following command::
+receiving tasks by running the following command:
+
+.. code-block:: bash
 
     $ rabbitmqctl list_queues -p <myvhost> name messages consumers
     Listing queues ...
@@ -373,18 +374,24 @@ How do I purge all waiting tasks?
 ---------------------------------
 
 **Answer:** You can use the ``celery purge`` command to purge
-all configured task queues::
+all configured task queues:
 
-        $ celery purge
+.. code-block:: bash
 
-or programatically::
+    $ celery purge
 
-        >>> from celery import current_app as celery
-        >>> celery.control.purge()
-        1753
+or programatically:
+
+.. code-block:: python
+
+    >>> from celery import current_app as celery
+    >>> celery.control.purge()
+    1753
 
 If you only want to purge messages from a specific queue
-you have to use the AMQP API or the :program:`celery amqp` utility::
+you have to use the AMQP API or the :program:`celery amqp` utility:
+
+.. code-block:: bash
 
     $ celery amqp queue.purge <queue name>
 
@@ -619,7 +626,7 @@ How can I get the task id of the current task?
 
 **Answer**: The current id and more is available in the task request::
 
-    @celery.task()
+    @celery.task
     def mytask():
         cache.set(mytask.request.id, "Running")
 
@@ -665,13 +672,13 @@ Also, a common pattern is to add callbacks to tasks:
 
     logger = get_task_logger(__name__)
 
-    @celery.task()
+    @celery.task
     def add(x, y):
         return x + y
 
     @celery.task(ignore_result=True)
     def log_result(result):
-        logger.info("log_result got: %r" % (result, ))
+        logger.info("log_result got: %r", result)
 
 Invocation::
 
@@ -704,7 +711,9 @@ so if you have more than one worker with the same host name, the
 control commands will be received in round-robin between them.
 
 To work around this you can explicitly set the host name for every worker
-using the :option:`--hostname` argument to :mod:`~celery.bin.celeryd`::
+using the :option:`--hostname` argument to :mod:`~celery.bin.celeryd`:
+
+.. code-block:: bash
 
     $ celeryd --hostname=$(hostname).1
     $ celeryd --hostname=$(hostname).2
@@ -777,7 +786,7 @@ this is rarely the case. Imagine the following task:
 
 .. code-block:: python
 
-    @celery.task()
+    @celery.task
     def process_upload(filename, tmpfile):
         # Increment a file count stored in a database
         increment_file_counter()
@@ -888,7 +897,9 @@ celeryd keeps spawning processes at startup
 -------------------------------------------
 
 **Answer**: This is a known issue on Windows.
-You have to start celeryd with the command::
+You have to start celeryd with the command:
+
+.. code-block:: bash
 
     $ python -m celery.bin.celeryd
 
@@ -902,15 +913,3 @@ The `-B` / `--beat` option to celeryd doesn't work?
 ----------------------------------------------------------------
 **Answer**: That's right. Run `celerybeat` and `celeryd` as separate
 services instead.
-
-.. _faq-windows-django-settings:
-
-`django-celery` can't find settings?
---------------------------------------
-
-**Answer**: You need to specify the :option:`--settings` argument to
-:program:`manage.py`::
-
-    $ python manage.py celeryd start --settings=settings
-
-See http://bit.ly/bo9RSw
