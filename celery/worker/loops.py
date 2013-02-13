@@ -10,6 +10,7 @@ from __future__ import absolute_import
 import socket
 
 from time import sleep
+from functools import partial
 
 from kombu.utils.eventio import READ, WRITE, ERR
 
@@ -40,12 +41,36 @@ def asynloop(obj, connection, consumer, strategies, ns, hub, qos,
         drain_nowait = connection.drain_nowait
         on_task_callbacks = hub.on_task
         keep_draining = connection.transport.nb_keep_draining
+        _basic_ack = connection.default_channel.basic_ack
+        active_delivery_tags = obj.active_delivery_tags
+        bufsize = min(obj.prefetch_count, 10)
+        buffer = []
+        acked = obj.acked
+
+        print('BUFFERSIZE: %r' % (bufsize, ))
 
         if heartbeat and connection.supports_heartbeats:
             hub.timer.apply_interval(
                 heartbeat * 1000.0 / hbrate, hbtick, (hbrate, ))
 
+        def _flush():
+            for m_args in buffer:
+                handle_task(*m_args)
+            buffer[:] = []
+
+        def _ack(message, *args):
+            tag = message.delivery_tag
+            if tag > acked[0] and not tag % (bufsize // 2):
+                _basic_ack(tag, multiple=True)
+                acked[0] = tag
+
         def on_task_received(body, message):
+            buffer.append((body, message))
+
+            if not len(buffer) % (bufsize - 1):
+                _flush()
+
+        def handle_task(body, message):
             if on_task_callbacks:
                 [callback() for callback in on_task_callbacks]
             try:
@@ -54,7 +79,7 @@ def asynloop(obj, connection, consumer, strategies, ns, hub, qos,
                 return handle_unknown_message(body, message)
 
             try:
-                strategies[name](message, body, message.ack_log_error)
+                strategies[name](message, body, partial(_ack, message))
             except KeyError as exc:
                 handle_unknown_task(body, message, exc)
             except InvalidTaskError as exc:
@@ -90,6 +115,7 @@ def asynloop(obj, connection, consumer, strategies, ns, hub, qos,
                     except ValueError:  # Issue 882
                         return
                     if not events:
+                        _flush()
                         on_poll_empty()
                     for fileno, event in events or ():
                         try:

@@ -122,6 +122,9 @@ class Consumer(object):
 
     restart_count = -1  # first start is the same as a restart
 
+    active_delivery_tags = []
+    acked = [None]
+
     class Namespace(bootsteps.Namespace):
         name = 'Consumer'
         default_steps = [
@@ -187,7 +190,7 @@ class Consumer(object):
         self.namespace.apply(self, **dict(worker_options or {}, **kwargs))
 
     def start(self):
-        ns, loop = self.namespace, self.loop
+        ns = self.namespace
         while ns.state != CLOSE:
             self.restart_count += 1
             maybe_shutdown()
@@ -459,7 +462,7 @@ class Tasks(bootsteps.StartStopStep):
 
     def __init__(self, c, initial_prefetch_count=2, **kwargs):
         c.task_consumer = c.qos = None
-        self.initial_prefetch_count = initial_prefetch_count
+        c.prefetch_count = self.initial_prefetch_count = initial_prefetch_count
 
     def start(self, c):
         c.update_strategies()
