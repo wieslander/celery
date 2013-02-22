@@ -5,9 +5,8 @@ from mock import Mock
 
 from celery import states
 from celery.app import app_or_default
-from celery.exceptions import IncompleteStream
-from celery.utils import uuid
-from celery.utils.serialization import pickle
+from celery.exceptions import IncompleteStream, TimeoutError
+from celery.five import range
 from celery.result import (
     AsyncResult,
     EagerResult,
@@ -16,9 +15,10 @@ from celery.result import (
     ResultSet,
     from_serializable,
 )
-from celery.exceptions import TimeoutError
 from celery.task import task
 from celery.task.base import Task
+from celery.utils import uuid
+from celery.utils.serialization import pickle
 
 from celery.tests.utils import AppCase
 from celery.tests.utils import skip_if_quick
@@ -39,15 +39,17 @@ def save_result(task):
     if task['state'] == states.SUCCESS:
         app.backend.mark_as_done(task['id'], task['result'])
     elif task['state'] == states.RETRY:
-        app.backend.mark_as_retry(task['id'], task['result'],
-                traceback=traceback)
+        app.backend.mark_as_retry(
+            task['id'], task['result'], traceback=traceback,
+        )
     else:
-        app.backend.mark_as_failure(task['id'], task['result'],
-                traceback=traceback)
+        app.backend.mark_as_failure(
+            task['id'], task['result'], traceback=traceback,
+        )
 
 
 def make_mock_group(size=10):
-    tasks = [mock_task('ts%d' % i, states.SUCCESS, i) for i in xrange(size)]
+    tasks = [mock_task('ts%d' % i, states.SUCCESS, i) for i in range(size)]
     [save_result(task) for task in tasks]
     return [AsyncResult(task['id']) for task in tasks]
 
@@ -81,7 +83,7 @@ class test_AsyncResult(AppCase):
     def test_get_children(self):
         tid = uuid()
         x = AsyncResult(tid)
-        child = [AsyncResult(uuid()).serializable() for i in xrange(10)]
+        child = [AsyncResult(uuid()).serializable() for i in range(10)]
         x.backend._cache[tid] = {'children': child}
         self.assertTrue(x.children)
         self.assertEqual(len(x.children), 10)
@@ -177,16 +179,16 @@ class test_AsyncResult(AppCase):
         ok2_res = AsyncResult(self.task2['id'])
         nok_res = AsyncResult(self.task3['id'])
         self.assertEqual(repr(ok_res), '<AsyncResult: %s>' % (
-                self.task1['id']))
+            self.task1['id']))
         self.assertEqual(repr(ok2_res), '<AsyncResult: %s>' % (
-                self.task2['id']))
+            self.task2['id']))
         self.assertEqual(repr(nok_res), '<AsyncResult: %s>' % (
-                self.task3['id']))
+            self.task3['id']))
 
         pending_id = uuid()
         pending_res = AsyncResult(pending_id)
         self.assertEqual(repr(pending_res), '<AsyncResult: %s>' % (
-                pending_id))
+            pending_id))
 
     def test_hash(self):
         self.assertEqual(hash(AsyncResult('x0w991')),
@@ -247,14 +249,15 @@ class test_AsyncResult(AppCase):
 class test_ResultSet(AppCase):
 
     def test_resultset_repr(self):
-        self.assertTrue(repr(ResultSet(map(AsyncResult, ['1', '2', '3']))))
+        self.assertTrue(repr(ResultSet(
+            [AsyncResult(t) for t in ['1', '2', '3']])))
 
     def test_eq_other(self):
         self.assertFalse(ResultSet([1, 3, 3]) == 1)
         self.assertTrue(ResultSet([1]) == ResultSet([1]))
 
     def test_get(self):
-        x = ResultSet(map(AsyncResult, [1, 2, 3]))
+        x = ResultSet([AsyncResult(t) for t in [1, 2, 3]])
         b = x.results[0].backend = Mock()
         b.supports_native_join = False
         x.join_native = Mock()
@@ -412,16 +415,16 @@ class test_GroupResult(AppCase):
     def test_join_native(self):
         backend = SimpleBackend()
         subtasks = [AsyncResult(uuid(), backend=backend)
-                        for i in range(10)]
+                    for i in range(10)]
         ts = GroupResult(uuid(), subtasks)
         backend.ids = [subtask.id for subtask in subtasks]
         res = ts.join_native()
-        self.assertEqual(res, range(10))
+        self.assertEqual(res, list(range(10)))
 
     def test_iter_native(self):
         backend = SimpleBackend()
         subtasks = [AsyncResult(uuid(), backend=backend)
-                        for i in range(10)]
+                    for i in range(10)]
         ts = GroupResult(uuid(), subtasks)
         backend.ids = [subtask.id for subtask in subtasks]
         self.assertEqual(len(list(ts.iter_native())), 10)
@@ -453,11 +456,11 @@ class test_GroupResult(AppCase):
     def test___iter__(self):
         it = iter(self.ts)
         results = sorted(list(it))
-        self.assertListEqual(results, list(xrange(self.size)))
+        self.assertListEqual(results, list(range(self.size)))
 
     def test_join(self):
         joined = self.ts.join()
-        self.assertListEqual(joined, list(xrange(self.size)))
+        self.assertListEqual(joined, list(range(self.size)))
 
     def test_successful(self):
         self.assertTrue(self.ts.successful())

@@ -41,10 +41,12 @@ import os
 import socket
 import sys
 
-from itertools import imap
 from pdb import Pdb
 
 from billiard import current_process
+
+from celery.five import range
+from celery.platforms import ignore_errno
 
 default_port = 6899
 
@@ -80,14 +82,15 @@ class Rdb(Pdb):
     _sock = None
 
     def __init__(self, host=CELERY_RDB_HOST, port=CELERY_RDB_PORT,
-            port_search_limit=100, port_skew=+0, out=sys.stdout):
+                 port_search_limit=100, port_skew=+0, out=sys.stdout):
         self.active = True
         self.out = out
 
         self._prev_handles = sys.stdin, sys.stdout
 
-        self._sock, this_port = self.get_avail_port(host, port,
-            port_search_limit, port_skew)
+        self._sock, this_port = self.get_avail_port(
+            host, port, port_search_limit, port_skew,
+        )
         self._sock.listen(1)
         self.ident = '{0}:{1}'.format(self.me, this_port)
         self.host = host
@@ -95,11 +98,11 @@ class Rdb(Pdb):
         self.say(BANNER.format(self=self))
 
         self._client, address = self._sock.accept()
-        self.remote_addr = ':'.join(imap(str, address))
+        self.remote_addr = ':'.join(map(str, address))
         self.say(SESSION_STARTED.format(self=self))
         self._handle = sys.stdin = sys.stdout = self._client.makefile('rw')
         Pdb.__init__(self, completekey='tab',
-                           stdin=self._handle, stdout=self._handle)
+                     stdin=self._handle, stdout=self._handle)
 
     def get_avail_port(self, host, port, search_limit=100, skew=+0):
         try:
@@ -108,7 +111,7 @@ class Rdb(Pdb):
         except ValueError:
             pass
         this_port = None
-        for i in xrange(search_limit):
+        for i in range(search_limit):
             _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             this_port = port + skew + i
             try:
@@ -148,12 +151,8 @@ class Rdb(Pdb):
     def set_trace(self, frame=None):
         if frame is None:
             frame = _frame().f_back
-        try:
+        with ignore_errno(errno.ECONNRESET):
             Pdb.set_trace(self, frame)
-        except socket.error as exc:
-            # connection reset by peer.
-            if exc.errno != errno.ECONNRESET:
-                raise
 
     def set_quit(self):
         # this raises a BdbQuit exception that we are unable to catch.

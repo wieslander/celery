@@ -16,12 +16,11 @@ Generated with:
 """
 from __future__ import absolute_import
 
-import __builtin__
-
 from mock import Mock, patch
 
 from celery import current_app
 from celery.exceptions import ImproperlyConfigured
+from celery.five import builtins
 from celery.security import setup_security, disable_untrusted_serializers
 from kombu.serialization import registry
 
@@ -40,7 +39,7 @@ class test_security(SecurityCase):
         self.assertEqual(0, len(disabled))
 
         disable_untrusted_serializers(
-                ['application/json', 'application/x-python-serialize'])
+            ['application/json', 'application/x-python-serialize'])
         self.assertIn('application/x-yaml', disabled)
         self.assertNotIn('application/json', disabled)
         self.assertNotIn('application/x-python-serialize', disabled)
@@ -78,20 +77,20 @@ class test_security(SecurityCase):
             store = Mock()
             setup_security(['json'], key, cert, store)
             dis.assert_called_with(['json'])
-            reg.assert_called_with('A', 'B', store)
+            reg.assert_called_with('A', 'B', store, 'sha1', 'json')
 
     def test_security_conf(self):
         current_app.conf.CELERY_TASK_SERIALIZER = 'auth'
 
         self.assertRaises(ImproperlyConfigured, setup_security)
 
-        _import = __builtin__.__import__
+        _import = builtins.__import__
 
         def import_hook(name, *args, **kwargs):
             if name == 'OpenSSL':
                 raise ImportError
             return _import(name, *args, **kwargs)
 
-        __builtin__.__import__ = import_hook
+        builtins.__import__ = import_hook
         self.assertRaises(ImproperlyConfigured, setup_security)
-        __builtin__.__import__ = _import
+        builtins.__import__ = _import

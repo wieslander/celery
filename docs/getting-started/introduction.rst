@@ -31,8 +31,6 @@ by :ref:`using webhooks <guide-webhooks>`.
 
 .. _RCelery: http://leapfrogdevelopment.github.com/rcelery/
 .. _`PHP client`: https://github.com/gjedeer/celery-php
-.. _`using webhooks`:
-    http://celery.github.com/celery/userguide/remote-tasks.html
 
 What do I need?
 ===============
@@ -213,7 +211,7 @@ Features
         - **User Components**
 
             Each worker component can be customized, and additional components
-            can be defined by the user.  The worker is built up using "boot steps" — a
+            can be defined by the user.  The worker is built up using "bootsteps" — a
             dependency graph enabling fine grained control of the worker's
             internals.
 
@@ -279,11 +277,11 @@ Quickjump
         - :ref:`retry a task when it fails <task-retry>`
         - :ref:`get the id of the current task <task-request-info>`
         - :ref:`know what queue a task was delivered to <task-request-info>`
-        - :ref:`see a list of running workers <monitoring-celeryctl>`
-        - :ref:`purge all messages <monitoring-celeryctl>`
-        - :ref:`inspect what the workers are doing <monitoring-celeryctl>`
-        - :ref:`see what tasks a worker has registerd <monitoring-celeryctl>`
-        - :ref:`migrate tasks to a new broker <monitoring-celeryctl>`
+        - :ref:`see a list of running workers <monitoring-control>`
+        - :ref:`purge all messages <monitoring-control>`
+        - :ref:`inspect what the workers are doing <monitoring-control>`
+        - :ref:`see what tasks a worker has registerd <monitoring-control>`
+        - :ref:`migrate tasks to a new broker <monitoring-control>`
         - :ref:`see a list of event message types <event-reference>`
         - :ref:`contribute to Celery <contributing>`
         - :ref:`learn about available configuration settings <configuration>`

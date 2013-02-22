@@ -26,7 +26,7 @@ class Inspect(object):
     app = None
 
     def __init__(self, destination=None, timeout=1, callback=None,
-            connection=None, app=None, limit=None):
+                 connection=None, app=None, limit=None):
         self.app = app or self.app
         self.destination = destination
         self.timeout = timeout
@@ -44,16 +44,21 @@ class Inspect(object):
         return by_node
 
     def _request(self, command, **kwargs):
-        return self._prepare(self.app.control.broadcast(command,
-                                      arguments=kwargs,
-                                      destination=self.destination,
-                                      callback=self.callback,
-                                      connection=self.connection,
-                                      limit=self.limit,
-                                      timeout=self.timeout, reply=True))
+        return self._prepare(self.app.control.broadcast(
+            command,
+            arguments=kwargs,
+            destination=self.destination,
+            callback=self.callback,
+            connection=self.connection,
+            limit=self.limit,
+            timeout=self.timeout, reply=True,
+        ))
 
     def report(self):
         return self._request('report')
+
+    def clock(self):
+        return self._request('clock')
 
     def active(self, safe=False):
         return self._request('dump_active', safe=safe)
@@ -83,6 +88,9 @@ class Inspect(object):
     def conf(self):
         return self._request('dump_conf')
 
+    def hello(self):
+        return self._request('hello')
+
 
 class Control(object):
     Mailbox = Mailbox
@@ -108,8 +116,13 @@ class Control(object):
             return self.app.amqp.TaskConsumer(conn).purge()
     discard_all = purge
 
+    def election(self, id, topic, action=None, connection=None):
+        self.broadcast('election', connection=connection, arguments={
+            'id': id, 'topic': topic, 'action': action,
+        })
+
     def revoke(self, task_id, destination=None, terminate=False,
-            signal='SIGTERM', **kwargs):
+               signal='SIGTERM', **kwargs):
         """Tell all (or specific) workers to revoke a task by id.
 
         If a task is revoked, the workers will ignore the task and
@@ -159,7 +172,7 @@ class Control(object):
                               **kwargs)
 
     def add_consumer(self, queue, exchange=None, exchange_type='direct',
-            routing_key=None, options=None, **kwargs):
+                     routing_key=None, options=None, **kwargs):
         """Tell all (or specific) workers to start consuming from a new queue.
 
         Only the queue name is required as if only the queue is specified
@@ -182,11 +195,13 @@ class Control(object):
         See :meth:`broadcast` for supported keyword arguments.
 
         """
-        return self.broadcast('add_consumer',
-                arguments=dict({'queue': queue, 'exchange': exchange,
-                                'exchange_type': exchange_type,
-                                'routing_key': routing_key}, **options or {}),
-                **kwargs)
+        return self.broadcast(
+            'add_consumer',
+            arguments=dict({'queue': queue, 'exchange': exchange,
+                            'exchange_type': exchange_type,
+                            'routing_key': routing_key}, **options or {}),
+            **kwargs
+        )
 
     def cancel_consumer(self, queue, **kwargs):
         """Tell all (or specific) workers to stop consuming from ``queue``.
@@ -194,8 +209,9 @@ class Control(object):
         Supports the same keyword arguments as :meth:`broadcast`.
 
         """
-        return self.broadcast('cancel_consumer',
-                arguments={'queue': queue}, **kwargs)
+        return self.broadcast(
+            'cancel_consumer', arguments={'queue': queue}, **kwargs
+        )
 
     def time_limit(self, task_name, soft=None, hard=None, **kwargs):
         """Tell all (or specific) workers to set time limits for
@@ -208,9 +224,10 @@ class Control(object):
         Any additional keyword arguments are passed on to :meth:`broadcast`.
 
         """
-        return self.broadcast('time_limit',
-                              arguments={'task_name': task_name,
-                                         'hard': hard, 'soft': soft}, **kwargs)
+        return self.broadcast(
+            'time_limit',
+            arguments={'task_name': task_name,
+                       'hard': hard, 'soft': soft}, **kwargs)
 
     def enable_events(self, destination=None, **kwargs):
         """Tell all (or specific) workers to enable events."""
@@ -237,8 +254,8 @@ class Control(object):
         return self.broadcast('pool_shrink', {}, destination, **kwargs)
 
     def broadcast(self, command, arguments=None, destination=None,
-            connection=None, reply=False, timeout=1, limit=None,
-            callback=None, channel=None, **extra_kwargs):
+                  connection=None, reply=False, timeout=1, limit=None,
+                  callback=None, channel=None, **extra_kwargs):
         """Broadcast a control command to the celery workers.
 
         :param command: Name of command to send.
@@ -256,7 +273,7 @@ class Control(object):
         """
         with self.app.connection_or_acquire(connection) as conn:
             arguments = dict(arguments or {}, **extra_kwargs)
-            return self.mailbox(conn)._broadcast(command, arguments,
-                                                 destination, reply, timeout,
-                                                 limit, callback,
-                                                 channel=channel)
+            return self.mailbox(conn)._broadcast(
+                command, arguments, destination, reply, timeout,
+                limit, callback, channel=channel,
+            )

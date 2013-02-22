@@ -8,14 +8,11 @@
 """
 from __future__ import absolute_import
 
-import os
-
 from kombu.utils.encoding import safe_repr
-from itertools import imap
 
+from celery.five import UserDict, items
 from celery.platforms import signals as _signals
 from celery.utils import timeutils
-from celery.utils.compat import UserDict
 from celery.utils.log import get_logger
 from celery.utils import jsonify
 
@@ -39,17 +36,19 @@ class Panel(UserDict):
 def revoke(panel, task_id, terminate=False, signal=None, **kwargs):
     """Revoke task by task id."""
     revoked.add(task_id)
-    action = 'revoked'
     if terminate:
         signum = _signals.signum(signal or 'TERM')
-        for request in state.active_requests:
+        for request in state.reserved_requests:
             if request.id == task_id:
-                action = 'terminated ({0})'.format(signum)
+                logger.info('Terminating %s (%s)', task_id, signum)
                 request.terminate(panel.consumer.pool, signal=signum)
                 break
+        else:
+            return {'ok': 'terminate: task {0} not found'.format(task_id)}
+        return {'ok': 'terminating {0} ({1})'.format(task_id, signal)}
 
-    logger.info('Task %s %s.', task_id, action)
-    return {'ok': 'task {0} {1}'.format(task_id, action)}
+    logger.info('Revoking task %s', task_id)
+    return {'ok': 'revoking task {0}'.format(task_id)}
 
 
 @Panel.register
@@ -60,23 +59,21 @@ def report(panel):
 @Panel.register
 def enable_events(panel):
     dispatcher = panel.consumer.event_dispatcher
-    if not dispatcher.enabled:
-        dispatcher.enable()
-        dispatcher.send('worker-online')
-        logger.info('Events enabled by remote.')
-        return {'ok': 'events enabled'}
-    return {'ok': 'events already enabled'}
+    if 'task' not in dispatcher.groups:
+        dispatcher.groups.add('task')
+        logger.info('Events of group {task} enabled by remote.')
+        return {'ok': 'task events enabled'}
+    return {'ok': 'task events already enabled'}
 
 
 @Panel.register
 def disable_events(panel):
     dispatcher = panel.consumer.event_dispatcher
-    if dispatcher.enabled:
-        dispatcher.send('worker-offline')
-        dispatcher.disable()
-        logger.info('Events disabled by remote.')
-        return {'ok': 'events disabled'}
-    return {'ok': 'events already disabled'}
+    if 'task' in dispatcher.groups:
+        dispatcher.groups.discard('task')
+        logger.info('Events of group {task} disabled by remote.')
+        return {'ok': 'task events disabled'}
+    return {'ok': 'task events already disabled'}
 
 
 @Panel.register
@@ -165,32 +162,34 @@ def dump_reserved(panel, safe=False, **kwargs):
         logger.debug('--Empty queue--')
         return []
     logger.debug('* Dump of currently reserved tasks:\n%s',
-                 '\n'.join(imap(safe_repr, reserved)))
+                 '\n'.join(safe_repr(id) for id in reserved))
     return [request.info(safe=safe)
             for request in reserved]
 
 
 @Panel.register
 def dump_active(panel, safe=False, **kwargs):
-    return [request.info(safe=safe)
-                for request in state.active_requests]
+    return [request.info(safe=safe) for request in state.active_requests]
 
 
 @Panel.register
 def stats(panel, **kwargs):
-    asinfo = {}
-    if panel.consumer.controller.autoscaler:
-        asinfo = panel.consumer.controller.autoscaler.info()
-    return {'total': state.total_count,
-            'consumer': panel.consumer.info,
-            'pool': panel.consumer.pool.info,
-            'autoscaler': asinfo,
-            'pid': os.getpid()}
+    return panel.consumer.controller.stats()
+
+
+@Panel.register
+def clock(panel, **kwargs):
+    return {'clock': panel.app.clock.value}
 
 
 @Panel.register
 def dump_revoked(panel, **kwargs):
     return list(state.revoked)
+
+
+@Panel.register
+def hello(panel, **kwargs):
+    return {'revoked': state.revoked._data, 'clock': panel.app.clock.forward()}
 
 
 @Panel.register
@@ -200,10 +199,10 @@ def dump_tasks(panel, taskinfoitems=None, **kwargs):
 
     def _extract_info(task):
         fields = dict((field, str(getattr(task, field, None)))
-                        for field in taskinfoitems
-                            if getattr(task, field, None) is not None)
+                      for field in taskinfoitems
+                      if getattr(task, field, None) is not None)
         if fields:
-            info = imap('='.join, fields.iteritems())
+            info = ['='.join(f) for f in items(fields)]
             return '{0} [{1}]'.format(task.name, ' '.join(info))
         return task.name
 
@@ -212,7 +211,7 @@ def dump_tasks(panel, taskinfoitems=None, **kwargs):
 
 @Panel.register
 def ping(panel, **kwargs):
-    return 'pong'
+    return {'ok': 'pong'}
 
 
 @Panel.register
@@ -256,7 +255,7 @@ def shutdown(panel, msg='Got shutdown from remote', **kwargs):
 
 @Panel.register
 def add_consumer(panel, queue, exchange=None, exchange_type=None,
-        routing_key=None, **options):
+                 routing_key=None, **options):
     panel.consumer.add_task_queue(queue, exchange, exchange_type,
                                   routing_key, **options)
     return {'ok': 'add consumer {0}'.format(queue)}
@@ -272,9 +271,14 @@ def cancel_consumer(panel, queue=None, **_):
 def active_queues(panel):
     """Returns the queues associated with each worker."""
     return [dict(queue.as_dict(recurse=True))
-                    for queue in panel.consumer.task_consumer.queues]
+            for queue in panel.consumer.task_consumer.queues]
 
 
 @Panel.register
 def dump_conf(panel, **kwargs):
     return jsonify(dict(panel.app.conf))
+
+
+@Panel.register
+def election(panel, id, topic, action=None, **kwargs):
+    panel.consumer.gossip.election(id, topic, action)

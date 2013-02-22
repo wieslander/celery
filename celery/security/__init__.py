@@ -39,7 +39,7 @@ def disable_untrusted_serializers(whitelist=None):
 
 
 def setup_security(allowed_serializers=None, key=None, cert=None, store=None,
-        digest='sha1', serializer='json'):
+                   digest='sha1', serializer='json'):
     """Setup the message-signing serializer.
 
     Disables untrusted serializers and if configured to use the ``auth``
@@ -83,4 +83,4 @@ def setup_security(allowed_serializers=None, key=None, cert=None, store=None,
 
     with open(key) as kf:
         with open(cert) as cf:
-            register_auth(kf.read(), cf.read(), store)
+            register_auth(kf.read(), cf.read(), store, digest, serializer)

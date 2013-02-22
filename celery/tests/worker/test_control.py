@@ -6,7 +6,7 @@ import socket
 from datetime import datetime, timedelta
 
 from kombu import pidbox
-from mock import Mock, patch
+from mock import Mock, patch, call
 
 from celery import current_app
 from celery.datastructures import AttributeDict
@@ -34,6 +34,9 @@ def mytask():
 class WorkController(object):
     autoscaler = None
 
+    def stats(self):
+        return {'total': state.total_count}
+
 
 class Consumer(consumer.Consumer):
 
@@ -47,10 +50,6 @@ class Consumer(consumer.Consumer):
 
         from celery.concurrency.base import BasePool
         self.pool = BasePool(10)
-
-    @property
-    def info(self):
-        return {'xyz': 'XYZ'}
 
 
 class test_ControlPanel(Case):
@@ -71,23 +70,21 @@ class test_ControlPanel(Case):
     def test_enable_events(self):
         consumer = Consumer()
         panel = self.create_panel(consumer=consumer)
-        consumer.event_dispatcher.enabled = False
+        evd = consumer.event_dispatcher
+        evd.groups = set()
         panel.handle('enable_events')
-        self.assertTrue(consumer.event_dispatcher.enable.call_count)
-        self.assertIn(('worker-online', ),
-                consumer.event_dispatcher.send.call_args)
-        consumer.event_dispatcher.enabled = True
+        self.assertIn('task', evd.groups)
+        evd.groups = set(['task'])
         self.assertIn('already enabled', panel.handle('enable_events')['ok'])
 
     def test_disable_events(self):
         consumer = Consumer()
         panel = self.create_panel(consumer=consumer)
-        consumer.event_dispatcher.enabled = True
+        evd = consumer.event_dispatcher
+        evd.enabled = True
+        evd.groups = set(['task'])
         panel.handle('disable_events')
-        self.assertTrue(consumer.event_dispatcher.disable.call_count)
-        self.assertIn(('worker-offline', ),
-                      consumer.event_dispatcher.send.call_args)
-        consumer.event_dispatcher.enabled = False
+        self.assertNotIn('task', evd.groups)
         self.assertIn('already disabled', panel.handle('disable_events')['ok'])
 
     def test_heartbeat(self):
@@ -141,13 +138,8 @@ class test_ControlPanel(Case):
     def test_stats(self):
         prev_count, state.total_count = state.total_count, 100
         try:
-            self.assertDictContainsSubset({'total': 100,
-                                           'consumer': {'xyz': 'XYZ'}},
+            self.assertDictContainsSubset({'total': 100},
                                           self.panel.handle('stats'))
-            self.panel.state.consumer = Mock()
-            self.panel.handle('stats')
-            self.assertTrue(
-                self.panel.state.consumer.controller.autoscaler.info.called)
         finally:
             state.total_count = prev_count
 
@@ -239,23 +231,26 @@ class test_ControlPanel(Case):
         self.assertFalse(panel.handle('dump_schedule'))
         r = TaskRequest(mytask.name, 'CAFEBABE', (), {})
         consumer.timer.schedule.enter(
-                consumer.timer.Entry(lambda x: x, (r, )),
-                    datetime.now() + timedelta(seconds=10))
+            consumer.timer.Entry(lambda x: x, (r, )),
+            datetime.now() + timedelta(seconds=10))
         self.assertTrue(panel.handle('dump_schedule'))
 
     def test_dump_reserved(self):
         from celery.worker import state
         consumer = Consumer()
-        state.reserved_requests.add(TaskRequest(mytask.name,
-                uuid(), args=(2, 2), kwargs={}))
+        state.reserved_requests.add(
+            TaskRequest(mytask.name, uuid(), args=(2, 2), kwargs={}),
+        )
         try:
             panel = self.create_panel(consumer=consumer)
             response = panel.handle('dump_reserved', {'safe': True})
-            self.assertDictContainsSubset({'name': mytask.name,
-                                        'args': (2, 2),
-                                        'kwargs': {},
-                                        'hostname': socket.gethostname()},
-                                        response[0])
+            self.assertDictContainsSubset(
+                {'name': mytask.name,
+                 'args': (2, 2),
+                 'kwargs': {},
+                 'hostname': socket.gethostname()},
+                response[0],
+            )
             state.reserved_requests.clear()
             self.assertFalse(panel.handle('dump_reserved'))
         finally:
@@ -265,8 +260,13 @@ class test_ControlPanel(Case):
         app = current_app
         app.conf.CELERY_DISABLE_RATE_LIMITS = True
         try:
-            e = self.panel.handle('rate_limit', arguments=dict(
-                 task_name=mytask.name, rate_limit='100/m'))
+            e = self.panel.handle(
+                'rate_limit',
+                arguments={
+                    'task_name': mytask.name,
+                    'rate_limit': '100/m'
+                },
+            )
             self.assertIn('rate limits disabled', e.get('error'))
         finally:
             app.conf.CELERY_DISABLE_RATE_LIMITS = False
@@ -309,8 +309,8 @@ class test_ControlPanel(Case):
 
     def test_rate_limit_nonexistant_task(self):
         self.panel.handle('rate_limit', arguments={
-                                'task_name': 'xxxx.does.not.exist',
-                                'rate_limit': '1000/s'})
+            'task_name': 'xxxx.does.not.exist',
+            'rate_limit': '1000/s'})
 
     def test_unexposed_command(self):
         with self.assertRaises(KeyError):
@@ -351,17 +351,17 @@ class test_ControlPanel(Case):
     def test_revoke_terminate(self):
         request = Mock()
         request.id = tid = uuid()
-        state.active_requests.add(request)
+        state.reserved_requests.add(request)
         try:
             r = control.revoke(Mock(), tid, terminate=True)
             self.assertIn(tid, revoked)
             self.assertTrue(request.terminate.call_count)
-            self.assertIn('terminated', r['ok'])
+            self.assertIn('terminating', r['ok'])
             # unknown task id only revokes
             r = control.revoke(Mock(), uuid(), terminate=True)
-            self.assertIn('revoked', r['ok'])
+            self.assertIn('not found', r['ok'])
         finally:
-            state.active_requests.discard(request)
+            state.reserved_requests.discard(request)
 
     def test_autoscale(self):
         self.panel.state.consumer = Mock()
@@ -382,7 +382,7 @@ class test_ControlPanel(Case):
         m = {'method': 'ping',
              'destination': hostname}
         r = self.panel.handle_message(m, None)
-        self.assertEqual(r, 'pong')
+        self.assertEqual(r, {'ok': 'pong'})
 
     def test_shutdown(self):
         m = {'method': 'shutdown',
@@ -405,8 +405,8 @@ class test_ControlPanel(Case):
                       mailbox=self.app.control.mailbox)
         r = panel.dispatch('ping', reply_to={'exchange': 'x',
                                              'routing_key': 'x'})
-        self.assertEqual(r, 'pong')
-        self.assertDictEqual(replies[0], {panel.hostname: 'pong'})
+        self.assertEqual(r, {'ok': 'pong'})
+        self.assertDictEqual(replies[0], {panel.hostname: {'ok': 'pong'}})
 
     def test_pool_restart(self):
         consumer = Consumer()
@@ -436,10 +436,12 @@ class test_ControlPanel(Case):
 
         self.assertTrue(consumer.controller.pool.restart.called)
         self.assertFalse(_reload.called)
-        self.assertEqual([(('foo',), {}), (('bar',), {})],
-                          _import.call_args_list)
+        self.assertItemsEqual(
+            [call('bar'), call('foo')],
+            _import.call_args_list,
+        )
 
-    def test_pool_restart_relaod_modules(self):
+    def test_pool_restart_reload_modules(self):
         consumer = Consumer()
         consumer.controller = _WC(app=current_app)
         consumer.controller.pool.restart = Mock()

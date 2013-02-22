@@ -47,14 +47,18 @@ class Beat(configurated):
     redirect_stdouts_level = from_config()
 
     def __init__(self, max_interval=None, app=None,
-            socket_timeout=30, pidfile=None, **kwargs):
-        """Starts the celerybeat task scheduler."""
+                 socket_timeout=30, pidfile=None, no_color=None, **kwargs):
+        """Starts the beat task scheduler."""
         self.app = app = app_or_default(app or self.app)
         self.setup_defaults(kwargs, namespace='celerybeat')
 
         self.max_interval = max_interval
         self.socket_timeout = socket_timeout
-        self.colored = app.log.colored(self.logfile)
+        self.no_color = no_color
+        self.colored = app.log.colored(
+            self.logfile,
+            enabled=not no_color if no_color is not None else no_color,
+        )
         self.pidfile = pidfile
 
         if not isinstance(self.loglevel, int):
@@ -62,17 +66,17 @@ class Beat(configurated):
 
     def run(self):
         print(str(self.colored.cyan(
-                    'celerybeat v{0} is starting.'.format(VERSION_BANNER))))
+            'celery beat v{0} is starting.'.format(VERSION_BANNER))))
         self.init_loader()
         self.set_process_title()
         self.start_scheduler()
 
-    def setup_logging(self):
-        handled = self.app.log.setup_logging_subsystem(loglevel=self.loglevel,
-                                                       logfile=self.logfile)
-        if self.redirect_stdouts and not handled:
-            self.app.log.redirect_stdouts_to_logger(logger,
-                    loglevel=self.redirect_stdouts_level)
+    def setup_logging(self, colorize=None):
+        if colorize is None and self.no_color is not None:
+            colorize = not self.no_color
+        self.app.log.setup(self.loglevel, self.logfile,
+                           self.redirect_stdouts, self.redirect_stdouts_level,
+                           colorize=colorize)
 
     def start_scheduler(self):
         c = self.colored
@@ -96,7 +100,7 @@ class Beat(configurated):
             self.install_sync_handler(beat)
             beat.start()
         except Exception as exc:
-            logger.critical('celerybeat raised exception %s: %r',
+            logger.critical('beat raised exception %s: %r',
                             exc.__class__, exc,
                             exc_info=True)
 
@@ -117,16 +121,17 @@ class Beat(configurated):
             scheduler_info=scheduler.info,
             hmax_interval=humanize_seconds(beat.max_interval),
             max_interval=beat.max_interval,
-            )
+        )
 
     def set_process_title(self):
         arg_start = 'manage' in sys.argv[0] and 2 or 1
-        platforms.set_process_title('celerybeat',
-                               info=' '.join(sys.argv[arg_start:]))
+        platforms.set_process_title(
+            'celery beat', info=' '.join(sys.argv[arg_start:]),
+        )
 
     def install_sync_handler(self, beat):
         """Install a `SIGTERM` + `SIGINT` handler that saves
-        the celerybeat schedule."""
+        the beat schedule."""
 
         def _sync(signum, frame):
             beat.sync()

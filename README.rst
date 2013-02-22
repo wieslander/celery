@@ -4,7 +4,7 @@
 
 .. image:: http://cloud.github.com/downloads/celery/celery/celery_128.png
 
-:Version: 3.1.0a1 (DEVEL)
+:Version: 3.1.0rc1 (Cipater)
 :Web: http://celeryproject.org/
 :Download: http://pypi.python.org/pypi/celery/
 :Source: http://github.com/celery/celery/
@@ -37,7 +37,7 @@ by using webhooks.
 .. _RCelery: http://leapfrogdevelopment.github.com/rcelery/
 .. _`PHP client`: https://github.com/gjedeer/celery-php
 .. _`using webhooks`:
-    http://celery.github.com/celery/userguide/remote-tasks.html
+    http://docs.celeryproject.org/en/latest/userguide/remote-tasks.html
 
 What do I need?
 ===============
@@ -344,7 +344,8 @@ to send regular patches.
 Be sure to also read the `Contributing to Celery`_ section in the
 documentation.
 
-.. _`Contributing to Celery`: http://celery.github.com/celery/contributing.html
+.. _`Contributing to Celery`:
+    http://docs.celeryproject.org/en/master/contributing.html
 
 .. _license:
 

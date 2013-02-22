@@ -4,12 +4,14 @@
 try:
     from setuptools import setup, find_packages
     from setuptools.command.test import test
+    is_setuptools = True
 except ImportError:
     raise
     from ez_setup import use_setuptools
     use_setuptools()
     from setuptools import setup, find_packages           # noqa
     from setuptools.command.test import test              # noqa
+    is_setuptools = False
 
 import os
 import sys
@@ -81,10 +83,9 @@ classes = """
 """
 classifiers = [s.strip() for s in classes.split('\n') if s]
 
-# -*- Python 3 -*-
-is_py3k = sys.version_info[0] == 3
-if is_py3k:
-    extra.update(use_2to3=True)
+PY3 = sys.version_info[0] == 3
+JYTHON = sys.platform.startswith('java')
+PYPY = hasattr(sys, 'pypy_version_info')
 
 # -*- Distribution Meta -*-
 
@@ -139,33 +140,23 @@ class quicktest(test):
 # -*- Installation Requires -*-
 
 py_version = sys.version_info
-is_jython = sys.platform.startswith('java')
-is_pypy = hasattr(sys, 'pypy_version_info')
 
 
 def strip_comments(l):
     return l.split('#', 1)[0].strip()
 
 
-def reqs(f):
-    return filter(None, [strip_comments(l) for l in open(
-        os.path.join(os.getcwd(), 'requirements', f)).readlines()])
+def reqs(*f):
+    return list(filter(None, [strip_comments(l) for l in open(
+        os.path.join(os.getcwd(), 'requirements', *f)).readlines()]))
 
-install_requires = reqs('default-py3k.txt' if is_py3k else 'default.txt')
-
-if is_jython:
+install_requires = reqs('default.txt')
+if JYTHON:
     install_requires.extend(reqs('jython.txt'))
-if py_version[0:2] == (2, 6):
-    install_requires.extend(reqs('py26.txt'))
 
 # -*- Tests Requires -*-
 
-if is_py3k:
-    tests_require = reqs('test-py3k.txt')
-elif is_pypy:
-    tests_require = reqs('test-pypy.txt')
-else:
-    tests_require = reqs('test.txt')
+tests_require = reqs('test3.txt' if PY3 else 'test.txt')
 
 # -*- Long Description -*-
 
@@ -183,15 +174,25 @@ console_scripts = entrypoints['console_scripts'] = [
 if CELERY_COMPAT_PROGRAMS:
     console_scripts.extend([
         'celeryd = celery.__main__:_compat_worker',
-        'celerybeat = celery.bin.celerybeat:main',
-        'camqadm = celery.bin.camqadm:main',
-        'celeryev = celery.bin.celeryev:main',
-        'celeryctl = celery.bin.celeryctl:main',
-        'celeryd-multi = celery.bin.celeryd_multi:main',
+        'celerybeat = celery.__main__:_compat_beat',
+        'celeryd-multi = celery.__main__:_compat_multi',
     ])
 
 # bundles: Only relevant for Celery developers.
 entrypoints['bundle.bundles'] = ['celery = celery.contrib.bundles:bundles']
+
+if is_setuptools:
+    extras = lambda *p: reqs('extras', *p)
+    extras_require = extra['extras_require'] = {
+        'redis': extras('redis.txt'),
+        'mongodb': extras('mongodb.txt'),
+        'couchdb': extras('couchdb.txt'),
+        'beanstalk': extras('beanstalk.txt'),
+        'zookeeper': extras('zookeeper.txt'),
+        'zeromq': extras('zeromq.txt'),
+        'sqlalchemy': extras('sqlalchemy.txt'),
+        'librabbitmq': extras('librabbitmq.txt'),
+    }
 
 # -*- %%% -*-
 

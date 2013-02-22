@@ -7,7 +7,6 @@
 """
 from __future__ import absolute_import
 
-import errno
 import hashlib
 import os
 import select
@@ -18,13 +17,16 @@ from collections import defaultdict
 from threading import Event
 
 from kombu.utils import eventio
+from kombu.utils.encoding import ensure_bytes
 
-from celery.platforms import ignore_EBADF
+from celery import bootsteps
+from celery.five import items
+from celery.platforms import ignore_errno
 from celery.utils.imports import module_file
 from celery.utils.log import get_logger
 from celery.utils.threads import bgThread
 
-from .bootsteps import StartStopComponent
+from .components import Pool
 
 try:                        # pragma: no cover
     import pyinotify
@@ -36,9 +38,10 @@ except ImportError:         # pragma: no cover
 logger = get_logger(__name__)
 
 
-class WorkerComponent(StartStopComponent):
-    name = 'worker.autoreloader'
-    requires = ('pool', )
+class WorkerComponent(bootsteps.StartStopStep):
+    label = 'Autoreloader'
+    conditional = True
+    requires = (Pool, )
 
     def __init__(self, w, autoreload=None, **kwargs):
         self.enabled = w.autoreload = autoreload
@@ -63,14 +66,14 @@ def file_hash(filename, algorithm='md5'):
     hobj = hashlib.new(algorithm)
     with open(filename, 'rb') as f:
         for chunk in iter(lambda: f.read(2 ** 20), ''):
-            hobj.update(chunk)
+            hobj.update(ensure_bytes(chunk))
     return hobj.digest()
 
 
 class BaseMonitor(object):
 
-    def __init__(self, files, on_change=None, shutdown_event=None,
-            interval=0.5):
+    def __init__(self, files,
+                 on_change=None, shutdown_event=None, interval=0.5):
         self.files = files
         self.interval = interval
         self._on_change = on_change
@@ -100,7 +103,7 @@ class StatMonitor(BaseMonitor):
     def start(self):
         while not self.shutdown_event.is_set():
             modified = dict((f, mt) for f, mt in self._mtimes()
-                                if self._maybe_modified(f, mt))
+                            if self._maybe_modified(f, mt))
             if modified:
                 self.on_change(modified)
                 self.modify_times.update(modified)
@@ -146,10 +149,10 @@ class KQueueMonitor(BaseMonitor):
             self.poller.poll(1)
 
     def close(self, poller):
-        for f, fd in self.filemap.iteritems():
+        for f, fd in items(self.filemap):
             if fd is not None:
                 poller.unregister(fd)
-                with ignore_EBADF():  # pragma: no cover
+                with ignore_errno('EBADF'):  # pragma: no cover
                     os.close(fd)
         self.filemap.clear()
         self.fdmap.clear()
@@ -210,7 +213,7 @@ implementations = {'kqueue': KQueueMonitor,
                    'inotify': InotifyMonitor,
                    'stat': StatMonitor}
 Monitor = implementations[
-            os.environ.get('CELERYD_FSNOTIFY') or default_implementation()]
+    os.environ.get('CELERYD_FSNOTIFY') or default_implementation()]
 
 
 class Autoreloader(bgThread):
@@ -229,11 +232,12 @@ class Autoreloader(bgThread):
 
     def on_init(self):
         files = self.file_to_module
-        files.update(dict((module_file(sys.modules[m]), m)
-                        for m in self.modules))
+        files.update(dict(
+            (module_file(sys.modules[m]), m) for m in self.modules))
 
-        self._monitor = self.Monitor(files, self.on_change,
-                shutdown_event=self._is_shutdown, **self.options)
+        self._monitor = self.Monitor(
+            files, self.on_change,
+            shutdown_event=self._is_shutdown, **self.options)
         self._hashes = dict([(f, file_hash(f)) for f in files])
 
     def on_poll_init(self, hub):
@@ -247,11 +251,8 @@ class Autoreloader(bgThread):
 
     def body(self):
         self.on_init()
-        try:
+        with ignore_errno('EINTR', 'EAGAIN'):
             self._monitor.start()
-        except OSError as exc:
-            if exc.errno not in (errno.EINTR, errno.EAGAIN):
-                raise
 
     def _maybe_modified(self, f):
         digest = file_hash(f)

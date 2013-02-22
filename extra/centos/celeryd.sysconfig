@@ -1,8 +1,22 @@
-# Passed into celeryd multi
-#CELERYD="-m celery.bin.celeryd_detach"
+# Path to the virtualenv. This could be /usr if python
+#   is in /usr/bin
+#BIN_PATH="/path/to/.virtualenvs/myvenv"
 
-# Path to the celerd multi
-#CELERYD_MULTI="/usr/bin/celeryd-multi"
+# Which Python to use
+#ENV_PYTHON="$BIN_PATH/bin/python"
+
+# Where to chdir before launching celeryd
+#CELERYD_CHDIR="$app_path/current"
+
+# Path to celery - which might be in a virtualenv
+#CELERY="$BIN_PATH/bin/celery"
+
+# Passed into celery multi
+#CELERYD="-m celery worker --detach"
+
+# Log and PID files
+#CELERYD_LOG_FILE="/path/to/var/log/celeryd/app_name-celeryworker.log"
+#CELERYD_PID_FILE="/path/to/var/run/celeryd/app_name-celeryworker.pid"
 
 # Sets the verbosity of the celeryd logging.
 #CELERYD_LOG_LEVEL="INFO"
@@ -16,6 +30,8 @@
 
 # Default arguments to be passed into celeryd.
 #CELERYD_OPTS=""
+# e.g. add app option:
+#CELERYD="-A proj.tasks:app"
 
-# Change to this directory first before launching celeryd.
-#CELERYD_CHDIR=""
+# Set the task modules that you want to have celery load
+#CELERY_IMPORTS=("tasks", )

@@ -3,29 +3,7 @@
 celery.contrib.batches
 ======================
 
-Collect messages and processes them as a list.
-
-**Example**
-
-A click counter that flushes the buffer every 100 messages, and every
-10 seconds.
-
-.. code-block:: python
-
-    from celery.task import task
-    from celery.contrib.batches import Batches
-
-    # Flush after 100 messages, or 10 seconds.
-    @task(base=Batches, flush_every=100, flush_interval=10)
-    def count_click(requests):
-        from collections import Counter
-        count = Counter(request.kwargs['url'] for request in requests)
-        for url, count in count.items():
-            print('>>> Clicks: {0} -> {1}'.format(url, count))
-
-Registering the click is done as follows:
-
-    >>> count_click.delay(url='http://example.com')
+Experimental task class that buffers messages and processes them as a list.
 
 .. warning::
 
@@ -36,17 +14,82 @@ Registering the click is done as follows:
     In the future we hope to add the ability to direct batching tasks
     to a channel with different QoS requirements than the task channel.
 
+**Simple Example**
+
+A click counter that flushes the buffer every 100 messages, and every
+seconds.  Does not do anything with the data, but can easily be modified
+to store it in a database.
+
+.. code-block:: python
+
+    # Flush after 100 messages, or 10 seconds.
+    @app.task(base=Batches, flush_every=100, flush_interval=10)
+    def count_click(requests):
+        from collections import Counter
+        count = Counter(request.kwargs['url'] for request in requests)
+        for url, count in count.items():
+            print('>>> Clicks: {0} -> {1}'.format(url, count))
+
+
+Then you can ask for a click to be counted by doing::
+
+    >>> count_click.delay('http://example.com')
+
+**Example returning results**
+
+An interface to the Web of Trust API that flushes the buffer every 100
+messages, and every 10 seconds.
+
+.. code-block:: python
+
+    import requests
+    from urlparse import urlparse
+
+    from celery.contrib.batches import Batches
+
+    wot_api_target = "https://api.mywot.com/0.4/public_link_json"
+
+    @app.task(base=Batches, flush_every=100, flush_interval=10)
+    def wot_api(requests):
+        sig = lambda url: url
+        reponses = wot_api_real(
+            (sig(*request.args, **request.kwargs) for request in requests)
+        )
+        # use mark_as_done to manually return response data
+        for response, request in zip(reponses, requests):
+            app.backend.mark_as_done(request.id, response)
+
+
+    def wot_api_real(urls):
+        domains = [urlparse(url).netloc for url in urls]
+        response = requests.get(
+            wot_api_target,
+            params={"hosts": ('/').join(set(domains)) + '/'}
+        )
+        return [response.json[domain] for domain in domains]
+
+Using the API is done as follows::
+
+    >>> wot_api.delay('http://example.com')
+
+.. note::
+
+    If you don't have an ``app`` instance then use the current app proxy
+    instead::
+
+        from celery import current_app
+        app.backend.mark_as_done(request.id, response)
+
 """
 from __future__ import absolute_import
 
 from itertools import count
-from Queue import Empty, Queue
 
 from celery.task import Task
-from celery.utils import timer2
+from celery.five import Empty, Queue
 from celery.utils.log import get_logger
-from celery.worker import state
-
+from celery.worker.job import Request
+from celery.utils import noop
 
 logger = get_logger(__name__)
 
@@ -133,33 +176,42 @@ class Batches(Task):
 
     def __init__(self):
         self._buffer = Queue()
-        self._count = count(1).next
+        self._count = count(1)
         self._tref = None
         self._pool = None
-        self._logging = None
 
     def run(self, requests):
         raise NotImplementedError('must implement run(requests)')
 
+    def Strategy(self, task, app, consumer):
+        self._pool = consumer.pool
+        hostname = consumer.hostname
+        eventer = consumer.event_dispatcher
+        Req = Request
+        connection_errors = consumer.connection_errors
+        timer = consumer.timer
+        put_buffer = self._buffer.put
+        flush_buffer = self._do_flush
+
+        def task_message_handler(message, body, ack):
+            request = Req(body, on_ack=ack, app=app, hostname=hostname,
+                          events=eventer, task=task,
+                          connection_errors=connection_errors,
+                          delivery_info=message.delivery_info)
+            put_buffer(request)
+
+            if self._tref is None:     # first request starts flush timer.
+                self._tref = timer.apply_interval(self.flush_interval * 1000.0,
+                                                  flush_buffer)
+
+            if not next(self._count) % self.flush_every:
+                flush_buffer()
+
+        return task_message_handler
+
     def flush(self, requests):
         return self.apply_buffer(requests, ([SimpleRequest.from_request(r)
-                                                for r in requests], ))
-
-    def execute(self, request, pool, loglevel, logfile):
-        if not self._pool:         # just take pool from first task.
-            self._pool = pool
-        if not self._logging:
-            self._logging = loglevel, logfile
-
-        state.task_ready(request)  # immediately remove from worker state.
-        self._buffer.put(request)
-
-        if self._tref is None:     # first request starts flush timer.
-            self._tref = timer2.apply_interval(self.flush_interval * 1000,
-                                               self._do_flush)
-
-        if not self._count() % self.flush_every:
-            self._do_flush()
+                                             for r in requests], ))
 
     def _do_flush(self):
         logger.debug('Batches: Wake-up to flush buffer...')
@@ -185,8 +237,9 @@ class Batches(Task):
         def on_return(result):
             [req.acknowledge() for req in acks_late[True]]
 
-        loglevel, logfile = self._logging
-        return self._pool.apply_async(apply_batches_task,
-                    (self, args, loglevel, logfile),
-                    accept_callback=on_accepted,
-                    callback=acks_late[True] and on_return or None)
+        return self._pool.apply_async(
+            apply_batches_task,
+            (self, args, 0, None),
+            accept_callback=on_accepted,
+            callback=acks_late[True] and on_return or noop,
+        )

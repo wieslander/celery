@@ -13,12 +13,12 @@ class test_BasePool(Case):
     def test_apply_target(self):
 
         scratch = {}
-        counter = count(0).next
+        counter = count(0)
 
         def gen_callback(name, retval=None):
 
             def callback(*args):
-                scratch[name] = (counter(), args)
+                scratch[name] = (next(counter), args)
                 return retval
 
             return callback
@@ -28,9 +28,10 @@ class test_BasePool(Case):
                      callback=gen_callback('callback'),
                      accept_callback=gen_callback('accept_callback'))
 
-        self.assertDictContainsSubset({
-                              'target': (1, (8, 16)),
-                              'callback': (2, (42, ))}, scratch)
+        self.assertDictContainsSubset(
+            {'target': (1, (8, 16)), 'callback': (2, (42, ))},
+            scratch,
+        )
         pa1 = scratch['accept_callback']
         self.assertEqual(0, pa1[0])
         self.assertEqual(pa1[1][0], os.getpid())
@@ -43,8 +44,8 @@ class test_BasePool(Case):
                      callback=gen_callback('callback'),
                      accept_callback=None)
         self.assertDictEqual(scratch,
-                              {'target': (3, (8, 16)),
-                               'callback': (4, (42, ))})
+                             {'target': (3, (8, 16)),
+                              'callback': (4, (42, ))})
 
     def test_does_not_debug(self):
         x = BasePool(10)

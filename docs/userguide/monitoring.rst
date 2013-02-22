@@ -20,13 +20,11 @@ features related to monitoring, like events and broadcast commands.
 Workers
 =======
 
-.. _monitoring-celeryctl:
+.. _monitoring-control:
 
+Management Command-line Utilities (``inspect``/``control``)
+-----------------------------------------------------------
 
-``celery``: Management Command-line Utilities
----------------------------------------------
-
-.. versionadded:: 2.1
 
 :program:`celery` can also be used to inspect
 and manage worker nodes (and to some degree tasks).
@@ -150,17 +148,17 @@ Commands
 
 .. note::
 
-    All ``inspect`` commands supports a ``--timeout`` argument,
+    All ``inspect`` and ``control`` commands supports a ``--timeout`` argument,
     This is the number of seconds to wait for responses.
     You may have to increase this timeout if you're not getting a response
     due to latency.
 
-.. _celeryctl-inspect-destination:
+.. _inspect-destination:
 
 Specifying destination nodes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-By default the inspect commands operates on all workers.
+By default the inspect and control commands operates on all workers.
 You can specify a single, or a list of workers by using the
 `--destination` argument:
 
@@ -168,33 +166,46 @@ You can specify a single, or a list of workers by using the
 
     $ celery inspect -d w1,w2 reserved
 
+    $ celery control -d w1,w2 enable_events
+
 
 .. _monitoring-flower:
 
-Celery Flower: Web interface
-----------------------------
+Flower: Real-time Celery web-monitor
+------------------------------------
 
-Celery Flower is a web based, real-time monitor and administration tool.
+Flower is a real-time web based monitor and administration tool for Celery.
+It is under active development, but is already an essential tool.
+Being the recommended monitor for Celery, it obsoletes the Django-Admin
+monitor, celerymon and the ncurses based monitor.
+
+Flower is pronounced like "flow", but you can also use the botanical version
+if you prefer.
 
 Features
 ~~~~~~~~
 
-- Shutdown or restart workers
-- View workers status (completed, running tasks, etc.)
-- View worker pool options (timeouts, processes, etc.)
-- Control worker pool size
-- View message broker options
-- View active queues, add or cancel queues
-- View processed task stats by type
-- View currently running tasks
-- View scheduled tasks
-- View reserved and revoked tasks
-- Apply time and rate limits
-- View all active configuration options
-- View all tasks (by type, by worker, etc.)
-- View all task options (arguments, start time, runtime, etc.)
-- Revoke or terminate tasks
-- View real-time execution graphs
+- Real-time monitoring using Celery Events
+
+    - Task progress and history.
+    - Ability to show task details (arguments, start time, runtime, and more)
+    - Graphs and statistics
+
+- Remote Control
+
+    - View worker status and statistics.
+    - Shutdown and restart worker instances.
+    - Control worker pool size and autoscale settings.
+    - View and modify the queues a worker instance consumes from.
+    - View currently running tasks
+    - View scheduled tasks (ETA/countdown)
+    - View reserved and revoked tasks
+    - Apply time and rate limits
+    - Configuration viewer
+    - Revoke or terminate tasks
+
+- HTTP API
+- OpenID authentication
 
 **Screenshots**
 
@@ -211,203 +222,22 @@ More screenshots_:
 Usage
 ~~~~~
 
-Install Celery Flower:
+You can use pip to install Flower:
 
 .. code-block:: bash
 
     $ pip install flower
 
-Launch Celery Flower and open http://localhost:8008 in browser:
+Running the flower command will start a web-server that you can visit:
 
 .. code-block:: bash
 
     $ celery flower
 
-.. _monitoring-django-admin:
+The default port is http://localhost:5555, but you can change this using the
+:option:`--port` argument::
 
-Django Admin Monitor
---------------------
-
-.. versionadded:: 2.1
-
-When you add `django-celery`_ to your Django project you will
-automatically get a monitor section as part of the Django admin interface.
-
-This can also be used if you're not using Celery with a Django project.
-
-*Screenshot*
-
-.. figure:: ../images/djangoceleryadmin2.jpg
-   :width: 700px
-
-.. _`django-celery`: http://pypi.python.org/pypi/django-celery
-
-
-.. _monitoring-django-starting:
-
-Starting the monitor
-~~~~~~~~~~~~~~~~~~~~
-
-The Celery section will already be present in your admin interface,
-but you won't see any data appearing until you start the snapshot camera.
-
-The camera takes snapshots of the events your workers sends at regular
-intervals, storing them in your database (See :ref:`monitoring-snapshots`).
-
-To start the camera run:
-
-.. code-block:: bash
-
-    $ python manage.py celerycam
-
-If you haven't already enabled the sending of events you need to do so:
-
-.. code-block:: bash
-
-    $ python manage.py celery control enable_events
-
-:Tip: You can enable events when the worker starts using the `-E` argument.
-
-Now that the camera has been started, and events have been enabled
-you should be able to see your workers and the tasks in the admin interface
-(it may take some time for workers to show up).
-
-The admin interface shows tasks, worker nodes, and even
-lets you perform some actions, like revoking and rate limiting tasks,
-or shutting down worker nodes.
-
-.. _monitoring-django-frequency:
-
-Shutter frequency
-~~~~~~~~~~~~~~~~~
-
-By default the camera takes a snapshot every second, if this is too frequent
-or you want to have higher precision, then you can change this using the
-``--frequency`` argument.  This is a float describing how often, in seconds,
-it should wake up to check if there are any new events:
-
-.. code-block:: bash
-
-    $ python manage.py celerycam --frequency=3.0
-
-The camera also supports rate limiting using the ``--maxrate`` argument.
-While the frequency controls how often the camera thread wakes up,
-the rate limit controls how often it will actually take a snapshot.
-
-The rate limits can be specified in seconds, minutes or hours
-by appending `/s`, `/m` or `/h` to the value.
-Example: ``--maxrate=100/m``, means "hundred writes a minute".
-
-The rate limit is off by default, which means it will take a snapshot
-for every ``--frequency`` seconds.
-
-The events also expire after some time, so the database doesn't fill up.
-Successful tasks are deleted after 1 day, failed tasks after 3 days,
-and tasks in other states after 5 days.
-
-.. _monitoring-django-reset:
-
-Resetting monitor data
-~~~~~~~~~~~~~~~~~~~~~~
-
-To reset the monitor data you need to clear out two models::
-
-    >>> from djcelery.models import WorkerState, TaskState
-
-    # delete worker history
-    >>> WorkerState.objects.all().delete()
-
-    # delete task history
-    >>> TaskState.objects.all().update(hidden=True)
-    >>> TaskState.objects.purge()
-
-.. _monitoring-django-expiration:
-
-Expiration
-~~~~~~~~~~
-
-By default monitor data for successful tasks will expire in 1 day,
-failed tasks in 3 days and pending tasks in 5 days.
-
-You can change the expiry times for each of these using
-adding the following settings to your :file:`settings.py`:
-
-.. code-block:: python
-
-    from datetime import timedelta
-
-    CELERYCAM_EXPIRE_SUCCESS = timedelta(hours=1)
-    CELERYCAM_EXPIRE_ERROR = timedelta(hours=2)
-    CELERYCAM_EXPIRE_PENDING = timedelta(hours=2)
-
-.. _monitoring-nodjango:
-
-Using outside of Django
-~~~~~~~~~~~~~~~~~~~~~~~
-
-`django-celery` also installs the :program:`djcelerymon` program. This
-can be used by non-Django users, and runs both a web server and a snapshot
-camera in the same process.
-
-**Installing**
-
-Using :program:`pip`:
-
-.. code-block:: bash
-
-    $ pip install -U django-celery
-
-or using :program:`easy_install`:
-
-.. code-block:: bash
-
-    $ easy_install -U django-celery
-
-**Running**
-
-:program:`djcelerymon` reads configuration from your Celery configuration
-module, and sets up the Django environment using the same settings:
-
-.. code-block:: bash
-
-    $ djcelerymon
-
-Database tables will be created the first time the monitor is run.
-By default an `sqlite3` database file named
-:file:`djcelerymon.db` is used, so make sure this file is writeable by the
-user running the monitor.
-
-If you want to store the events in a different database, e.g. MySQL,
-then you can configure the `DATABASE*` settings directly in your Celery
-config module.  See http://docs.djangoproject.com/en/dev/ref/settings/#databases
-for more information about the database options available.
-
-You will also be asked to create a superuser (and you need to create one
-to be able to log into the admin later)::
-
-    Creating table auth_permission
-    Creating table auth_group_permissions
-    [...]
-
-    You just installed Django's auth system, which means you don't
-    have any superusers defined.  Would you like to create
-    one now? (yes/no): yes
-    Username (Leave blank to use 'username'): username
-    Email address: me@example.com
-    Password: ******
-    Password (again): ******
-    Superuser created successfully.
-
-    [...]
-    Django version 1.2.1, using settings 'celeryconfig'
-    Development server is running at http://127.0.0.1:8000/
-    Quit the server with CONTROL-C.
-
-Now that the service is started you can visit the monitor
-at http://127.0.0.1:8000, and log in using the user you created.
-
-For a list of the command line options supported by :program:`djcelerymon`,
-please see ``djcelerymon --help``.
+    $ open http://localhost:5555
 
 .. _monitoring-celeryev:
 
@@ -419,7 +249,8 @@ celery events: Curses Monitor
 `celery events` is a simple curses monitor displaying
 task and worker history.  You can inspect the result and traceback of tasks,
 and it also supports some management commands like rate limiting and shutting
-down workers.
+down workers.  This monitor was started as a proof of concept, and you
+probably want to use Flower instead.
 
 Starting:
 
@@ -450,21 +281,6 @@ For a complete list of options use ``--help``:
 .. code-block:: bash
 
     $ celery events --help
-
-
-.. _monitoring-celerymon:
-
-celerymon: Web monitor
-----------------------
-
-`celerymon`_ is the ongoing work to create a web monitor.
-It's far from complete yet, and does currently only support
-a JSON API.  Help is desperately needed for this project, so if you,
-or someone you know would like to contribute templates, design, code
-or help this project in any way, please get in touch!
-
-:Tip: The Django admin monitor can be used even though you're not using
-      Celery with a Django project.  See :ref:`monitoring-nodjango`.
 
 .. _`celerymon`: http://github.com/celery/celerymon/
 
@@ -590,7 +406,7 @@ Events
 ======
 
 The worker has the ability to send a message whenever some event
-happens.  These events are then captured by tools like :program:`celerymon`
+happens.  These events are then captured by tools like Flower,
 and :program:`celery events` to monitor the cluster.
 
 .. _monitoring-snapshots:
@@ -773,77 +589,137 @@ You can listen to specific events by specifying the handlers:
 .. _event-reference:
 
 Event Reference
----------------
+===============
 
 This list contains the events sent by the worker, and their arguments.
 
 .. _event-reference-task:
 
 Task Events
+-----------
+
+.. event:: task-sent
+
+task-sent
+~~~~~~~~~
+
+:signature: ``task-sent(uuid, name, args, kwargs, retries, eta, expires,
+              queue, exchange, routing_key)``
+
+Sent when a task message is published and
+the :setting:`CELERY_SEND_TASK_SENT_EVENT` setting is enabled.
+
+.. event:: task-received
+
+task-received
+~~~~~~~~~~~~~
+
+:signature: ``task-received(uuid, name, args, kwargs, retries, eta, hostname,
+              timestamp)``
+
+Sent when the worker receives a task.
+
+.. event:: task-started
+
+task-started
+~~~~~~~~~~~~
+
+:signature: ``task-started(uuid, hostname, timestamp, pid)``
+
+Sent just before the worker executes the task.
+
+.. event:: task-succeeded
+
+task-succeeded
+~~~~~~~~~~~~~~
+
+:signature: ``task-succeeded(uuid, result, runtime, hostname, timestamp)``
+
+Sent if the task executed successfully.
+
+Runtime is the time it took to execute the task using the pool.
+(Starting from the task is sent to the worker pool, and ending when the
+pool result handler callback is called).
+
+.. event:: task-failed
+
+task-failed
 ~~~~~~~~~~~
 
-* ``task-sent(uuid, name, args, kwargs, retries, eta, expires,
-  queue, exchange, routing_key)``
+:signature: ``task-failed(uuid, exception, traceback, hostname, timestamp)``
 
-   Sent when a task message is published and
-   the :setting:`CELERY_SEND_TASK_SENT_EVENT` setting is enabled.
+Sent if the execution of the task failed.
 
-* ``task-received(uuid, name, args, kwargs, retries, eta, hostname,
-  timestamp)``
+.. event:: task-revoked
 
-    Sent when the worker receives a task.
+task-revoked
+~~~~~~~~~~~~
 
-* ``task-started(uuid, hostname, timestamp, pid)``
+:signature: ``task-revoked(uuid, terminated, signum, expired)``
 
-    Sent just before the worker executes the task.
+Sent if the task has been revoked (Note that this is likely
+to be sent by more than one worker).
 
-* ``task-succeeded(uuid, result, runtime, hostname, timestamp)``
+- ``terminated`` is set to true if the task process was terminated,
+    and the ``signum`` field set to the signal used.
 
-    Sent if the task executed successfully.
+- ``expired`` is set to true if the task expired.
 
-    Runtime is the time it took to execute the task using the pool.
-    (Starting from the task is sent to the worker pool, and ending when the
-    pool result handler callback is called).
+.. event:: task-retried
 
-* ``task-failed(uuid, exception, traceback, hostname, timestamp)``
+task-retried
+~~~~~~~~~~~~
 
-    Sent if the execution of the task failed.
+:signature: ``task-retried(uuid, exception, traceback, hostname, timestamp)``
 
-* ``task-revoked(uuid, terminated, signum, expired)``
-
-    Sent if the task has been revoked (Note that this is likely
-    to be sent by more than one worker).
-
-    - ``terminated`` is set to true if the task process was terminated,
-      and the ``signum`` field set to the signal used.
-
-    - ``expired`` is set to true if the task expired.
-
-* ``task-retried(uuid, exception, traceback, hostname, timestamp)``
-
-    Sent if the task failed, but will be retried in the future.
+Sent if the task failed, but will be retried in the future.
 
 .. _event-reference-worker:
 
 Worker Events
+-------------
+
+.. event:: worker-online
+
+worker-online
 ~~~~~~~~~~~~~
 
-* ``worker-online(hostname, timestamp, freq, sw_ident, sw_ver, sw_sys)``
+:signature: ``worker-online(hostname, timestamp, freq, sw_ident, sw_ver, sw_sys)``
 
-    The worker has connected to the broker and is online.
+The worker has connected to the broker and is online.
 
-    * `hostname`: Hostname of the worker.
-    * `timestamp`: Event timestamp.
-    * `freq`: Heartbeat frequency in seconds (float).
-    * `sw_ident`: Name of worker software (e.g. ``py-celery``).
-    * `sw_ver`: Software version (e.g. 2.2.0).
-    * `sw_sys`: Operating System (e.g. Linux, Windows, Darwin).
+- `hostname`: Hostname of the worker.
+- `timestamp`: Event timestamp.
+- `freq`: Heartbeat frequency in seconds (float).
+- `sw_ident`: Name of worker software (e.g. ``py-celery``).
+- `sw_ver`: Software version (e.g. 2.2.0).
+- `sw_sys`: Operating System (e.g. Linux, Windows, Darwin).
 
-* ``worker-heartbeat(hostname, timestamp, freq, sw_ident, sw_ver, sw_sys)``
+.. event:: worker-heartbeat
 
-    Sent every minute, if the worker has not sent a heartbeat in 2 minutes,
-    it is considered to be offline.
+worker-heartbeat
+~~~~~~~~~~~~~~~~
 
-* ``worker-offline(hostname, timestamp, freq, sw_ident, sw_ver, sw_sys)``
+:signature: ``worker-heartbeat(hostname, timestamp, freq, sw_ident, sw_ver, sw_sys,
+              active, processed)``
 
-    The worker has disconnected from the broker.
+Sent every minute, if the worker has not sent a heartbeat in 2 minutes,
+it is considered to be offline.
+
+- `hostname`: Hostname of the worker.
+- `timestamp`: Event timestamp.
+- `freq`: Heartbeat frequency in seconds (float).
+- `sw_ident`: Name of worker software (e.g. ``py-celery``).
+- `sw_ver`: Software version (e.g. 2.2.0).
+- `sw_sys`: Operating System (e.g. Linux, Windows, Darwin).
+- `active`: Number of currently executing tasks.
+- `processed`: Total number of tasks processed by this worker.
+
+.. event:: worker-offline
+
+worker-offline
+~~~~~~~~~~~~~~
+
+:signature: ``worker-offline(hostname, timestamp, freq, sw_ident, sw_ver, sw_sys)``
+
+The worker has disconnected from the broker.

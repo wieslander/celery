@@ -29,7 +29,7 @@ Example connecting to the :signal:`task_sent` signal:
 
     @task_sent.connect
     def task_sent_handler(sender=None, task_id=None, task=None, args=None,
-                          kwargs=None, \*\*kwds):
+                          kwargs=None, **kwds):
         print('Got signal task_sent for task id {0}'.format(task_id))
 
 
@@ -41,9 +41,9 @@ has been sent by providing the `sender` argument to
 
 .. code-block:: python
 
-    @task_sent.connect(task_sent_handler, sender='tasks.add')
+    @task_sent.connect(sender='tasks.add')
     def task_sent_handler(sender=None, task_id=None, task=None, args=None,
-                          kwargs=None, \*\*kwds):
+                          kwargs=None, **kwds):
         print('Got signal task_sent for task id {0}'.format(task_id)
 
 .. _signal-ref:
@@ -226,7 +226,7 @@ used to route a task to any specific worker:
     @celeryd_after_setup.connect
     def setup_direct_queue(sender, instance, **kwargs):
         queue_name = '{0}.dq'.format(sender)  # sender is the hostname of the worker
-        instance.app.queues.select_add(queue_name)
+        instance.app.amqp.queues.select_add(queue_name)
 
 Provides arguments:
 
@@ -247,7 +247,7 @@ Provides arguments:
 celeryd_init
 ~~~~~~~~~~~~
 
-This is the first signal sent when :program:`celeryd` starts up.
+This is the first signal sent when :program:`celery worker` starts up.
 The ``sender`` is the host name of the worker, so this signal can be used
 to setup worker specific configuration:
 
@@ -314,15 +314,15 @@ worker_shutdown
 
 Dispatched when the worker is about to shut down.
 
-Celerybeat Signals
-------------------
+Beat Signals
+------------
 
 .. signal:: beat_init
 
 beat_init
 ~~~~~~~~~
 
-Dispatched when celerybeat starts (either standalone or embedded).
+Dispatched when :program:`celery beat` starts (either standalone or embedded).
 Sender is the :class:`celery.beat.Service` instance.
 
 .. signal:: beat_embedded_init
@@ -330,8 +330,8 @@ Sender is the :class:`celery.beat.Service` instance.
 beat_embedded_init
 ~~~~~~~~~~~~~~~~~~
 
-Dispatched in addition to the :signal:`beat_init` signal when celerybeat is
-started as an embedded process.  Sender is the
+Dispatched in addition to the :signal:`beat_init` signal when :program:`celery
+beat` is started as an embedded process.  Sender is the
 :class:`celery.beat.Service` instance.
 
 Eventlet Signals

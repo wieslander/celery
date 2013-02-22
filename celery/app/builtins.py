@@ -10,7 +10,6 @@
 from __future__ import absolute_import
 
 from collections import deque
-from itertools import imap, izip, starmap
 
 from celery._state import get_current_worker_task
 from celery.utils import uuid
@@ -43,7 +42,7 @@ def add_backend_cleanup_task(app):
     backend.
 
     This task is also added do the periodic task schedule so that it is
-    run every day at midnight, but :program:`celerybeat` must be running
+    run every day at midnight, but :program:`celery beat` must be running
     for this to be effective.
 
     Note that not all backends do anything for this, what needs to be
@@ -52,7 +51,7 @@ def add_backend_cleanup_task(app):
 
     """
 
-    @app.task(name='celery.backend_cleanup')
+    @app.task(name='celery.backend_cleanup', _force_evaluate=True)
     def backend_cleanup():
         app.backend.cleanup()
     return backend_cleanup
@@ -70,9 +69,9 @@ def add_unlock_chord_task(app):
     from celery import result as _res
 
     @app.task(name='celery.chord_unlock', max_retries=None,
-              default_retry_delay=1)
+              default_retry_delay=1, ignore_result=True, _force_evaluate=True)
     def unlock_chord(group_id, callback, interval=None, propagate=False,
-            max_retries=None, result=None, Result=_res.AsyncResult):
+                     max_retries=None, result=None, Result=_res.AsyncResult):
         if interval is None:
             interval = unlock_chord.default_retry_delay
         result = _res.GroupResult(group_id, [Result(r) for r in result])
@@ -80,7 +79,8 @@ def add_unlock_chord_task(app):
         if result.ready():
             subtask(callback).delay(j(propagate=propagate))
         else:
-            unlock_chord.retry(countdown=interval, max_retries=max_retries)
+            return unlock_chord.retry(countdown=interval,
+                                      max_retries=max_retries)
     return unlock_chord
 
 
@@ -88,10 +88,10 @@ def add_unlock_chord_task(app):
 def add_map_task(app):
     from celery.canvas import subtask
 
-    @app.task(name='celery.map')
+    @app.task(name='celery.map', _force_evaluate=True)
     def xmap(task, it):
         task = subtask(task).type
-        return list(imap(task, it))
+        return [task(item) for item in it]
     return xmap
 
 
@@ -99,10 +99,10 @@ def add_map_task(app):
 def add_starmap_task(app):
     from celery.canvas import subtask
 
-    @app.task(name='celery.starmap')
+    @app.task(name='celery.starmap', _force_evaluate=True)
     def xstarmap(task, it):
         task = subtask(task).type
-        return list(starmap(task, it))
+        return [task(*item) for item in it]
     return xstarmap
 
 
@@ -110,7 +110,7 @@ def add_starmap_task(app):
 def add_chunk_task(app):
     from celery.canvas import chunks as _chunks
 
-    @app.task(name='celery.chunks')
+    @app.task(name='celery.chunks', _force_evaluate=True)
     def chunks(task, it, n):
         return _chunks.apply_chunks(task, it, n)
     return chunks
@@ -132,10 +132,12 @@ def add_group_task(app):
             result = from_serializable(result)
             # any partial args are added to all tasks in the group
             taskit = (subtask(task).clone(partial_args)
-                        for i, task in enumerate(tasks))
+                      for i, task in enumerate(tasks))
             if self.request.is_eager or app.conf.CELERY_ALWAYS_EAGER:
-                return app.GroupResult(result.id,
-                        [task.apply(group_id=group_id) for task in taskit])
+                return app.GroupResult(
+                    result.id,
+                    [task.apply(group_id=group_id) for task in taskit],
+                )
             with app.producer_or_acquire() as pub:
                 [task.apply_async(group_id=group_id, publisher=pub,
                                   add_to_parent=False) for task in taskit]
@@ -146,8 +148,8 @@ def add_group_task(app):
 
         def prepare(self, options, tasks, args, **kwargs):
             AsyncResult = self.AsyncResult
-            options['group_id'] = group_id = \
-                    options.setdefault('task_id', uuid())
+            options['group_id'] = group_id = (
+                options.setdefault('task_id', uuid()))
 
             def prepare_member(task):
                 task = maybe_subtask(task)
@@ -160,8 +162,9 @@ def add_group_task(app):
                 return task, AsyncResult(tid)
 
             try:
-                tasks, res = list(izip(*[prepare_member(task)
-                                                for task in tasks]))
+                tasks, res = list(zip(
+                    *[prepare_member(task) for task in tasks]
+                ))
             except ValueError:  # tasks empty
                 tasks, res = [], []
             return (tasks, self.app.GroupResult(group_id, res), group_id, args)
@@ -169,22 +172,24 @@ def add_group_task(app):
         def apply_async(self, partial_args=(), kwargs={}, **options):
             if self.app.conf.CELERY_ALWAYS_EAGER:
                 return self.apply(partial_args, kwargs, **options)
-            tasks, result, gid, args = self.prepare(options,
-                                            args=partial_args, **kwargs)
-            super(Group, self).apply_async((list(tasks),
-                result.serializable(), gid, args), **options)
+            tasks, result, gid, args = self.prepare(
+                options, args=partial_args, **kwargs
+            )
+            super(Group, self).apply_async((
+                list(tasks), result.serializable(), gid, args), **options
+            )
             return result
 
         def apply(self, args=(), kwargs={}, **options):
             return super(Group, self).apply(
-                    self.prepare(options, args=args, **kwargs),
-                    **options).get()
+                self.prepare(options, args=args, **kwargs),
+                **options).get()
     return Group
 
 
 @shared_task
 def add_chain_task(app):
-    from celery.canvas import chord, group, maybe_subtask
+    from celery.canvas import Signature, chord, group, maybe_subtask
     _app = app
 
     class Chain(app.Task):
@@ -201,34 +206,34 @@ def add_chain_task(app):
                 # First task get partial args from chain.
                 task = maybe_subtask(steps.popleft())
                 task = task.clone() if i else task.clone(args)
+                res = task._freeze()
                 i += 1
-                tid = task.options.get('task_id')
-                if tid is None:
-                    tid = task.options['task_id'] = uuid()
-                res = task.type.AsyncResult(tid)
 
-                # automatically upgrade group(..) | s to chord(group, s)
                 if isinstance(task, group):
+                    # automatically upgrade group(..) | s to chord(group, s)
                     try:
                         next_step = steps.popleft()
+                        # for chords we freeze by pretending it's a normal
+                        # task instead of a group.
+                        res = Signature._freeze(task)
+                        task = chord(task, body=next_step, task_id=res.task_id)
                     except IndexError:
-                        next_step = None
-                if next_step is not None:
-                    task = chord(task, body=next_step, task_id=tid)
+                        pass
                 if prev_task:
                     # link previous task to this task.
                     prev_task.link(task)
                     # set the results parent attribute.
                     res.parent = prev_res
 
-                results.append(res)
-                tasks.append(task)
+                if not isinstance(prev_task, chord):
+                    results.append(res)
+                    tasks.append(task)
                 prev_task, prev_res = task, res
 
             return tasks, results
 
         def apply_async(self, args=(), kwargs={}, group_id=None, chord=None,
-                task_id=None, **options):
+                        task_id=None, link=None, link_error=None, **options):
             if self.app.conf.CELERY_ALWAYS_EAGER:
                 return self.apply(args, kwargs, **options)
             options.pop('publisher', None)
@@ -241,6 +246,13 @@ def add_chain_task(app):
             if task_id:
                 tasks[-1].set(task_id=task_id)
                 result = tasks[-1].type.AsyncResult(task_id)
+            # make sure we can do a link() and link_error() on a chain object.
+            if link:
+                tasks[-1].set(link=link)
+            # and if any task in the chain fails, call the errbacks
+            if link_error:
+                for task in tasks:
+                    task.set(link_error=link_error)
             tasks[0].apply_async()
             return result
 
@@ -268,25 +280,26 @@ def add_chord_task(app):
         accept_magic_kwargs = False
         ignore_result = False
 
-        def run(self, header, body, partial_args=(), interval=1,
+        def run(self, header, body, partial_args=(), interval=1, countdown=1,
                 max_retries=None, propagate=False, eager=False, **kwargs):
             group_id = uuid()
             AsyncResult = self.app.AsyncResult
             prepare_member = self._prepare_member
 
             # - convert back to group if serialized
-            if not isinstance(header, group):
-                header = group([maybe_subtask(t) for t in  header])
+            tasks = header.tasks if isinstance(header, group) else header
+            header = group([maybe_subtask(s).clone() for s in tasks])
             # - eager applies the group inline
             if eager:
                 return header.apply(args=partial_args, task_id=group_id)
 
             results = [AsyncResult(prepare_member(task, body, group_id))
-                            for task in header.tasks]
+                       for task in header.tasks]
 
             # - fallback implementations schedules the chord_unlock task here
             app.backend.on_chord_apply(group_id, body,
                                        interval=interval,
+                                       countdown=countdown,
                                        max_retries=max_retries,
                                        propagate=propagate,
                                        result=results)
@@ -306,19 +319,20 @@ def add_chord_task(app):
         def apply_async(self, args=(), kwargs={}, task_id=None, **options):
             if self.app.conf.CELERY_ALWAYS_EAGER:
                 return self.apply(args, kwargs, **options)
-            group_id = options.pop('group_id', None)
-            chord = options.pop('chord', None)
             header = kwargs.pop('header')
             body = kwargs.pop('body')
             header, body = (list(maybe_subtask(header)),
                             maybe_subtask(body))
-            if group_id:
-                body.set(group_id=group_id)
-            if chord:
-                body.set(chord=chord)
+            # forward certain options to body
+            for opt_name in ['group_id', 'chord']:
+                opt_value = options.pop(opt_name, None)
+                if opt_value:
+                    body.set(**{opt_name: opt_value})
+            [body.link(s) for s in options.pop('link', [])]
+            [body.link_error(s) for s in options.pop('link_error', [])]
             callback_id = body.options.setdefault('task_id', task_id or uuid())
             parent = super(Chord, self).apply_async((header, body, args),
-                                                     kwargs, **options)
+                                                    kwargs, **options)
             body_result = self.AsyncResult(callback_id)
             body_result.parent = parent
             return body_result
@@ -328,5 +342,5 @@ def add_chord_task(app):
             res = super(Chord, self).apply(args, dict(kwargs, eager=True),
                                            **options)
             return maybe_subtask(body).apply(
-                        args=(res.get(propagate=propagate).get(), ))
+                args=(res.get(propagate=propagate).get(), ))
     return Chord

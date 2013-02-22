@@ -8,10 +8,11 @@
 """
 from __future__ import absolute_import
 
+import os
 import threading
 import warnings
 
-from collections import deque
+from collections import Callable, defaultdict, deque
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import wraps
@@ -22,18 +23,34 @@ from kombu.clocks import LamportClock
 from kombu.utils import cached_property
 
 from celery import platforms
+from celery._state import _task_stack, _tls, get_current_app, _register_app
 from celery.exceptions import AlwaysEagerIgnored
+from celery.five import items, values
 from celery.loaders import get_loader_cls
 from celery.local import PromiseProxy, maybe_evaluate
-from celery._state import _task_stack, _tls, get_current_app, _register_app
 from celery.utils.functional import first
 from celery.utils.imports import instantiate, symbol_by_name
+from celery.utils.objects import mro_lookup
 
 from .annotations import prepare as prepare_annotations
 from .builtins import shared_task, load_shared_tasks
 from .defaults import DEFAULTS, find_deprecated_settings
 from .registry import TaskRegistry
-from .utils import AppPickler, Settings, bugreport, _unpickle_app
+from .utils import (
+    AppPickler, Settings, bugreport, _unpickle_app, _unpickle_app_v2,
+)
+
+_EXECV = os.environ.get('FORKED_BY_MULTIPROCESSING')
+BUILTIN_FIXUPS = frozenset([
+    'celery.fixups.django:fixup',
+])
+
+
+def app_has_custom(app, attr):
+    return mro_lookup(app.__class__, attr, stop=(Celery, object),
+                      monkey_patched=[__name__])
+
+_EXECV = os.environ.get('FORKED_BY_MULTIPROCESSING')
 
 
 def _unpickle_appattr(reverse_name, args):
@@ -58,9 +75,10 @@ class Celery(object):
     _pool = None
 
     def __init__(self, main=None, loader=None, backend=None,
-            amqp=None, events=None, log=None, control=None,
-            set_as_current=True, accept_magic_kwargs=False,
-            tasks=None, broker=None, include=None, **kwargs):
+                 amqp=None, events=None, log=None, control=None,
+                 set_as_current=True, accept_magic_kwargs=False,
+                 tasks=None, broker=None, include=None, changes=None,
+                 fixups=None, **kwargs):
         self.clock = LamportClock()
         self.main = main
         self.amqp_cls = amqp or self.amqp_cls
@@ -72,6 +90,8 @@ class Celery(object):
         self.set_as_current = set_as_current
         self.registry_cls = symbol_by_name(self.registry_cls)
         self.accept_magic_kwargs = accept_magic_kwargs
+        self.user_options = defaultdict(set)
+        self.steps = defaultdict(set)
 
         self.configured = False
         self._pending_defaults = deque()
@@ -83,13 +103,23 @@ class Celery(object):
         if not isinstance(self._tasks, TaskRegistry):
             self._tasks = TaskRegistry(self._tasks or {})
 
+        # If the class defins a custom __reduce_args__ we need to use
+        # the old way of pickling apps, which is pickling a list of
+        # args instead of the new way that pickles a dict of keywords.
+        self._using_v1_reduce = app_has_custom(self, '__reduce_args__')
+
         # these options are moved to the config to
         # simplify pickling of the app object.
-        self._preconf = {}
+        self._preconf = changes or {}
         if broker:
             self._preconf['BROKER_URL'] = broker
         if include:
             self._preconf['CELERY_IMPORTS'] = include
+
+        # Apply fixups.
+        self.fixups = set(fixups or ())
+        for fixup in self.fixups | BUILTIN_FIXUPS:
+            symbol_by_name(fixup)(self)
 
         if self.set_as_current:
             self.set_current()
@@ -99,20 +129,40 @@ class Celery(object):
     def set_current(self):
         _tls.current_app = self
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
+    def close(self):
+        self._maybe_close_pool()
+
     def on_init(self):
         """Optional callback called at init."""
         pass
 
     def start(self, argv=None):
-        return instantiate('celery.bin.celery:CeleryCommand', app=self) \
-                    .execute_from_commandline(argv)
+        return instantiate(
+            'celery.bin.celery:CeleryCommand',
+            app=self).execute_from_commandline(argv)
 
     def worker_main(self, argv=None):
-        return instantiate('celery.bin.celeryd:WorkerCommand', app=self) \
-                    .execute_from_commandline(argv)
+        return instantiate(
+            'celery.bin.worker:worker',
+            app=self).execute_from_commandline(argv)
 
     def task(self, *args, **opts):
         """Creates new task class from any callable."""
+        if _EXECV and not opts.get('_force_evaluate'):
+            # When using execv the task in the original module will point to a
+            # different app, so doing things like 'add.request' will point to
+            # a differnt task instance.  This makes sure it will always use
+            # the task instance from the current app.
+            # Really need a better solution for this :(
+            from . import shared_task as proxies_to_curapp
+            opts['_force_evaluate'] = True  # XXX Py2.5
+            return proxies_to_curapp(*args, **opts)
 
         def inner_create_task_cls(shared=True, filter=None, **opts):
 
@@ -136,19 +186,21 @@ class Celery(object):
 
             return _create_task_cls
 
-        if len(args) == 1 and callable(args[0]):
+        if len(args) == 1 and isinstance(args[0], Callable):
             return inner_create_task_cls(**opts)(*args)
         return inner_create_task_cls(**opts)
 
     def _task_from_fun(self, fun, **options):
         base = options.pop('base', None) or self.Task
 
+        print('%r base is: %r' % (fun, base, ))
+
         T = type(fun.__name__, (base, ), dict({
-                'app': self,
-                'accept_magic_kwargs': False,
-                'run': staticmethod(fun),
-                '__doc__': fun.__doc__,
-                '__module__': fun.__module__}, **options))()
+            'app': self,
+            'accept_magic_kwargs': False,
+            'run': staticmethod(fun),
+            '__doc__': fun.__doc__,
+            '__module__': fun.__module__}, **options))()
         task = self._tasks[T.name]  # return global instance.
         task.bind(self)
         return task
@@ -163,11 +215,11 @@ class Celery(object):
                 while pending:
                     maybe_evaluate(pending.popleft())
 
-                for task in self._tasks.itervalues():
+                for task in values(self._tasks):
                     task.bind(self)
 
     def add_defaults(self, fun):
-        if not callable(fun):
+        if not isinstance(fun, Callable):
             d, fun = fun, lambda: d
         if self.configured:
             return self.conf.add_defaults(fun())
@@ -184,10 +236,13 @@ class Celery(object):
     def config_from_cmdline(self, argv, namespace='celery'):
         self.conf.update(self.loader.cmdline_config_parser(argv, namespace))
 
+    def autodiscover_tasks(self, packages, related_name='tasks'):
+        self.loader.autodiscover_tasks(packages, related_name)
+
     def send_task(self, name, args=None, kwargs=None, countdown=None,
-            eta=None, task_id=None, producer=None, connection=None,
-            result_cls=None, expires=None, queues=None, publisher=None,
-            **options):
+                  eta=None, task_id=None, producer=None, connection=None,
+                  result_cls=None, expires=None, queues=None, publisher=None,
+                  **options):
         producer = producer or publisher  # XXX compat
         if self.conf.CELERY_ALWAYS_EAGER:  # pragma: no cover
             warnings.warn(AlwaysEagerIgnored(
@@ -199,33 +254,36 @@ class Celery(object):
                            self.conf.CELERY_MESSAGE_COMPRESSION)
         options = router.route(options, name, args, kwargs)
         with self.producer_or_acquire(producer) as producer:
-            return result_cls(producer.publish_task(name, args, kwargs,
-                        task_id=task_id,
-                        countdown=countdown, eta=eta,
-                        expires=expires, **options))
+            return result_cls(producer.publish_task(
+                name, args, kwargs,
+                task_id=task_id,
+                countdown=countdown, eta=eta,
+                expires=expires, **options
+            ))
 
     def connection(self, hostname=None, userid=None, password=None,
-            virtual_host=None, port=None, ssl=None, connect_timeout=None,
-            transport=None, transport_options=None, heartbeat=None, **kwargs):
+                   virtual_host=None, port=None, ssl=None,
+                   connect_timeout=None, transport=None,
+                   transport_options=None, heartbeat=None, **kwargs):
         conf = self.conf
         return self.amqp.Connection(
-                    hostname or conf.BROKER_HOST,
-                    userid or conf.BROKER_USER,
-                    password or conf.BROKER_PASSWORD,
-                    virtual_host or conf.BROKER_VHOST,
-                    port or conf.BROKER_PORT,
-                    transport=transport or conf.BROKER_TRANSPORT,
-                    ssl=self.either('BROKER_USE_SSL', ssl),
-                    connect_timeout=self.either(
-                        'BROKER_CONNECTION_TIMEOUT', connect_timeout),
-                    heartbeat=heartbeat,
-                    transport_options=dict(conf.BROKER_TRANSPORT_OPTIONS,
-                                           **transport_options or {}))
+            hostname or conf.BROKER_HOST,
+            userid or conf.BROKER_USER,
+            password or conf.BROKER_PASSWORD,
+            virtual_host or conf.BROKER_VHOST,
+            port or conf.BROKER_PORT,
+            transport=transport or conf.BROKER_TRANSPORT,
+            ssl=self.either('BROKER_USE_SSL', ssl),
+            connect_timeout=self.either(
+                'BROKER_CONNECTION_TIMEOUT', connect_timeout),
+            heartbeat=heartbeat,
+            transport_options=dict(conf.BROKER_TRANSPORT_OPTIONS,
+                                   **transport_options or {}))
     broker_connection = connection
 
     @contextmanager
     def connection_or_acquire(self, connection=None, pool=True,
-            *args, **kwargs):
+                              *args, **kwargs):
         if connection:
             yield connection
         else:
@@ -276,15 +334,17 @@ class Celery(object):
     def mail_admins(self, subject, body, fail_silently=False):
         if self.conf.ADMINS:
             to = [admin_email for _, admin_email in self.conf.ADMINS]
-            return self.loader.mail_admins(subject, body, fail_silently, to=to,
-                                       sender=self.conf.SERVER_EMAIL,
-                                       host=self.conf.EMAIL_HOST,
-                                       port=self.conf.EMAIL_PORT,
-                                       user=self.conf.EMAIL_HOST_USER,
-                                       password=self.conf.EMAIL_HOST_PASSWORD,
-                                       timeout=self.conf.EMAIL_TIMEOUT,
-                                       use_ssl=self.conf.EMAIL_USE_SSL,
-                                       use_tls=self.conf.EMAIL_USE_TLS)
+            return self.loader.mail_admins(
+                subject, body, fail_silently, to=to,
+                sender=self.conf.SERVER_EMAIL,
+                host=self.conf.EMAIL_HOST,
+                port=self.conf.EMAIL_PORT,
+                user=self.conf.EMAIL_HOST_USER,
+                password=self.conf.EMAIL_HOST_PASSWORD,
+                timeout=self.conf.EMAIL_TIMEOUT,
+                use_ssl=self.conf.EMAIL_USE_SSL,
+                use_tls=self.conf.EMAIL_USE_TLS,
+            )
 
     def select_queues(self, queues=None):
         return self.amqp.queues.select_subset(queues)
@@ -300,28 +360,35 @@ class Celery(object):
     def _get_backend(self):
         from celery.backends import get_backend_by_url
         backend, url = get_backend_by_url(
-                self.backend_cls or self.conf.CELERY_RESULT_BACKEND,
-                self.loader)
+            self.backend_cls or self.conf.CELERY_RESULT_BACKEND,
+            self.loader)
         return backend(app=self, url=url)
 
     def _get_config(self):
         self.configured = True
         s = Settings({}, [self.prepare_config(self.loader.conf),
-                             deepcopy(DEFAULTS)])
+                          deepcopy(DEFAULTS)])
 
         # load lazy config dict initializers.
         pending = self._pending_defaults
         while pending:
             s.add_defaults(pending.popleft()())
         if self._preconf:
-            for key, value in self._preconf.iteritems():
+            for key, value in items(self._preconf):
                 setattr(s, key, value)
         return s
 
     def _after_fork(self, obj_):
+        self._maybe_close_pool()
+
+    def _maybe_close_pool(self):
         if self._pool:
             self._pool.force_close_all()
             self._pool = None
+            amqp = self.amqp
+            if amqp._producer_pool:
+                amqp._producer_pool.force_close_all()
+                amqp._producer_pool = None
 
     def create_task_cls(self):
         """Creates a base task class using default configuration
@@ -330,7 +397,7 @@ class Celery(object):
                                        attribute='_app', abstract=True)
 
     def subclass_with_self(self, Class, name=None, attribute='app',
-            reverse=None, **kw):
+                           reverse=None, **kw):
         """Subclass an app-compatible class by setting its app attribute
         to be this app instance.
 
@@ -363,16 +430,41 @@ class Celery(object):
             type(self).__name__, self.main or '__main__', id(self))
 
     def __reduce__(self):
+        if self._using_v1_reduce:
+            return self.__reduce_v1__()
+        return (_unpickle_app_v2, (self.__class__, self.__reduce_keys__()))
+
+    def __reduce_v1__(self):
         # Reduce only pickles the configuration changes,
         # so the default configuration doesn't have to be passed
         # between processes.
-        return (_unpickle_app, (self.__class__, self.Pickler)
-                              + self.__reduce_args__())
+        return (
+            _unpickle_app,
+            (self.__class__, self.Pickler) + self.__reduce_args__(),
+        )
+
+    def __reduce_keys__(self):
+        """Returns keyword arguments used to reconstruct the object
+        when unpickling."""
+        return {
+            'main': self.main,
+            'changes': self.conf._prepare_pickleable_changes(),
+            'loader': self.loader_cls,
+            'backend': self.backend_cls,
+            'amqp': self.amqp_cls,
+            'events': self.events_cls,
+            'log': self.log_cls,
+            'control': self.control_cls,
+            'accept_magic_kwargs': self.accept_magic_kwargs,
+            'fixups': self.fixups,
+        }
 
     def __reduce_args__(self):
-        return (self.main, self.conf.changes, self.loader_cls,
-                self.backend_cls, self.amqp_cls, self.events_cls,
-                self.log_cls, self.control_cls, self.accept_magic_kwargs)
+        """Deprecated method, please use :meth:`__reduce_keys__` instead."""
+        return (self.main, self.conf._prepare_pickleable_changes(),
+                self.loader_cls, self.backend_cls, self.amqp_cls,
+                self.events_cls, self.log_cls, self.control_cls,
+                self.accept_magic_kwargs)
 
     @cached_property
     def Worker(self):

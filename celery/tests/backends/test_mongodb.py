@@ -99,7 +99,7 @@ class test_MongoBackend(AppCase):
 
             connection = self.backend._get_connection()
             mock_Connection.assert_called_once_with(
-                MONGODB_HOST, MONGODB_PORT)
+                MONGODB_HOST, MONGODB_PORT, max_pool_size=10)
             self.assertEquals(sentinel.connection, connection)
 
     def test_get_connection_no_connection_mongodb_uri(self):
@@ -112,7 +112,8 @@ class test_MongoBackend(AppCase):
             mock_Connection.return_value = sentinel.connection
 
             connection = self.backend._get_connection()
-            mock_Connection.assert_called_once_with(mongodb_uri)
+            mock_Connection.assert_called_once_with(
+                mongodb_uri, max_pool_size=10)
             self.assertEquals(sentinel.connection, connection)
 
     @patch('celery.backends.mongodb.MongoBackend._get_connection')
@@ -196,7 +197,7 @@ class test_MongoBackend(AppCase):
         self.assertEquals(
             ['status', 'task_id', 'date_done', 'traceback', 'result',
              'children'],
-            ret_val.keys())
+            list(ret_val.keys()))
 
     @patch('celery.backends.mongodb.MongoBackend._get_database')
     def test_get_task_meta_for_no_result(self, mock_get_database):
@@ -250,7 +251,10 @@ class test_MongoBackend(AppCase):
         mock_database.__getitem__.assert_called_once_with(MONGODB_COLLECTION)
         mock_collection.find_one.assert_called_once_with(
             {'_id': sentinel.taskset_id})
-        self.assertEquals(['date_done', 'result', 'task_id'], ret_val.keys())
+        self.assertEquals(
+            ['date_done', 'result', 'task_id'],
+            list(ret_val.keys()),
+        )
 
     @patch('celery.backends.mongodb.MongoBackend._get_database')
     def test_delete_group(self, mock_get_database):

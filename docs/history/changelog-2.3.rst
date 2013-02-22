@@ -21,8 +21,8 @@ Security Fixes
 
 * [Security: `CELERYSA-0001`_] Daemons would set effective id's rather than
   real id's when the :option:`--uid`/:option:`--gid` arguments to
-  :program:`celeryd-multi`, :program:`celeryd_detach`,
-  :program:`celerybeat` and :program:`celeryev` were used.
+  :program:`celery multi`, :program:`celeryd_detach`,
+  :program:`celery beat` and :program:`celery events` were used.
 
   This means privileges weren't properly dropped, and that it would
   be possible to regain supervisor privileges later.
@@ -69,8 +69,8 @@ News
 
 * Improved Contributing guide.
 
-    If you'd like to contribute to Celery you should read this
-    guide: http://celery.github.com/celery/contributing.html
+    If you'd like to contribute to Celery you should read the
+    :ref:`Contributing Gudie <contributing>`.
 
     We are looking for contributors at all skill levels, so don't
     hesitate!
@@ -100,7 +100,7 @@ Fixes
 * Fixes case where the worker could become unresponsive because of tasks
   exceeding the hard time limit.
 
-* The ``task-sent`` event was missing from the event reference.
+* The :event:`task-sent` event was missing from the event reference.
 
 * ``ResultSet.iterate`` now returns results as they finish (Issue #459).
 
@@ -276,7 +276,7 @@ News
 * PyPy: The default pool implementation used is now multiprocessing
   if running on PyPy 1.5.
 
-* celeryd-multi: now supports "pass through" options.
+* multi: now supports "pass through" options.
 
     Pass through options makes it easier to use celery without a
     configuration file, or just add last-minute options on the command
@@ -286,9 +286,9 @@ News
 
     .. code-block:: bash
 
-        $ celeryd-multi start 4  -c 2  -- broker.host=amqp.example.com \
-                                          broker.vhost=/               \
-                                          celery.disable_rate_limits=yes
+        $ celery multi start 4  -c 2  -- broker.host=amqp.example.com \
+                                         broker.vhost=/               \
+                                         celery.disable_rate_limits=yes
 
 * celerybeat: Now retries establishing the connection (Issue #419).
 
@@ -336,7 +336,7 @@ News
 * Terminating a task on Windows now also terminates all of the tasks child
   processes (Issue #384).
 
-* celeryd: ``-I|--include`` option now always searches the current directory
+* worker: ``-I|--include`` option now always searches the current directory
   to import the specified modules.
 
 * Cassandra backend: Now expires results by using TTLs.
@@ -360,7 +360,7 @@ Fixes
 * ``CELERY_TASK_ERROR_WHITE_LIST`` is now properly initialized
   in all loaders.
 
-* celeryd_detach now passes through command-line configuration.
+* celeryd_detach now passes through command line configuration.
 
 * Remote control command ``add_consumer`` now does nothing if the
   queue is already being consumed from.

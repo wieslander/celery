@@ -17,7 +17,6 @@ import time
 import sys
 
 from datetime import timedelta
-from itertools import imap
 
 from kombu import serialization
 from kombu.utils.encoding import bytes_to_str, ensure_bytes, from_utf8
@@ -26,16 +25,17 @@ from celery import states
 from celery.app import current_task
 from celery.datastructures import LRUCache
 from celery.exceptions import TimeoutError, TaskRevokedError
+from celery.five import items
 from celery.result import from_serializable, GroupResult
 from celery.utils import timeutils
 from celery.utils.serialization import (
-        get_pickled_exception,
-        get_pickleable_exception,
-        create_exception_cls,
+    get_pickled_exception,
+    get_pickleable_exception,
+    create_exception_cls,
 )
 
 EXCEPTION_ABLE_CODECS = frozenset(['pickle', 'yaml'])
-is_py3k = sys.version_info >= (3, 0)
+PY3 = sys.version_info >= (3, 0)
 
 
 def unpickle_backend(cls, args, kwargs):
@@ -58,16 +58,18 @@ class BaseBackend(object):
     #: If true the backend must implement :meth:`get_many`.
     supports_native_join = False
 
-    def __init__(self, app=None, serializer=None, max_cached_results=None,
-            **kwargs):
+    def __init__(self, app=None, serializer=None,
+                 max_cached_results=None, **kwargs):
         from celery.app import app_or_default
         self.app = app_or_default(app)
-        self.serializer = serializer or self.app.conf.CELERY_RESULT_SERIALIZER
+        conf = self.app.conf
+        self.serializer = serializer or conf.CELERY_RESULT_SERIALIZER
         (self.content_type,
          self.content_encoding,
          self.encoder) = serialization.registry._encoders[self.serializer]
-        self._cache = LRUCache(limit=max_cached_results or
-                                      self.app.conf.CELERY_MAX_CACHED_RESULTS)
+        self._cache = LRUCache(
+            limit=max_cached_results or conf.CELERY_MAX_CACHED_RESULTS,
+        )
 
     def mark_as_started(self, task_id, **meta):
         """Mark a task as started"""
@@ -116,7 +118,7 @@ class BaseBackend(object):
         return payload
 
     def decode(self, payload):
-        payload = is_py3k and payload or str(payload)
+        payload = PY3 and payload or str(payload)
         return serialization.decode(payload,
                                     content_type=self.content_type,
                                     content_encoding=self.content_encoding)
@@ -256,13 +258,18 @@ class BaseBackend(object):
         """Cleanup actions to do at the end of a task worker process."""
         pass
 
+    def on_task_call(self, producer, task_id):
+        return {}
+
     def on_chord_part_return(self, task, propagate=False):
         pass
 
-    def fallback_chord_unlock(self, group_id, body, result=None, **kwargs):
+    def fallback_chord_unlock(self, group_id, body, result=None,
+                              countdown=1, **kwargs):
         kwargs['result'] = [r.id for r in result]
-        self.app.tasks['celery.chord_unlock'].apply_async((group_id, body, ),
-                                                          kwargs, countdown=1)
+        self.app.tasks['celery.chord_unlock'].apply_async(
+            (group_id, body, ), kwargs, countdown=countdown,
+        )
     on_chord_apply = fallback_chord_unlock
 
     def current_task_children(self):
@@ -323,13 +330,13 @@ class KeyValueStoreBackend(BaseBackend):
         if hasattr(values, 'items'):
             # client returns dict so mapping preserved.
             return dict((self._strip_prefix(k), self.decode(v))
-                            for k, v in values.iteritems()
-                                if v is not None)
+                        for k, v in items(values)
+                        if v is not None)
         else:
             # client returns list so need to recreate mapping.
             return dict((bytes_to_str(keys[i]), self.decode(value))
-                            for i, value in enumerate(values)
-                                if value is not None)
+                        for i, value in enumerate(values)
+                        if value is not None)
 
     def get_many(self, task_ids, timeout=None, interval=0.5):
         ids = set(task_ids)
@@ -344,20 +351,20 @@ class KeyValueStoreBackend(BaseBackend):
                     yield bytes_to_str(task_id), cached
                     cached_ids.add(task_id)
 
-        ids ^= cached_ids
+        ids.difference_update(cached_ids)
         iterations = 0
         while ids:
             keys = list(ids)
             r = self._mget_to_results(self.mget([self.get_key_for_task(k)
-                                                    for k in keys]), keys)
+                                                 for k in keys]), keys)
             self._cache.update(r)
-            ids ^= set(imap(bytes_to_str, r))
-            for key, value in r.iteritems():
+            ids.difference_update(set(map(bytes_to_str, r)))
+            for key, value in items(r):
                 yield bytes_to_str(key), value
             if timeout and iterations * interval >= timeout:
                 raise TimeoutError('Operation timed out ({0})'.format(timeout))
             time.sleep(interval)  # don't busy loop.
-            iterations += 0
+            iterations += 1
 
     def _forget(self, task_id):
         self.delete(self.get_key_for_task(task_id))
@@ -428,6 +435,7 @@ class DisabledBackend(BaseBackend):
         pass
 
     def _is_disabled(self, *args, **kwargs):
-        raise NotImplementedError('No result backend configured.  '
-                'Please see the documentation for more information.')
+        raise NotImplementedError(
+            'No result backend configured.  '
+            'Please see the documentation for more information.')
     wait_for = get_status = get_result = get_traceback = _is_disabled

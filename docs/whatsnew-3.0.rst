@@ -50,7 +50,7 @@ Highlights
 
         Read more in the :ref:`Canvas <guide-canvas>` user guide.
 
-    - All of Celery's command line programs are now available from a single
+    - All of Celery's command-line programs are now available from a single
       :program:`celery` umbrella command.
 
     - This is the last version to support Python 2.5.
@@ -61,7 +61,7 @@ Highlights
 
         Celery will automatically use the :mod:`librabbitmq` module
         if installed, which is a very fast and memory-optimized
-        replacement for the amqplib module.
+        replacement for the py-amqp module.
 
     - Redis support is more reliable with improved ack emulation.
 
@@ -112,7 +112,8 @@ or Redis as a broker, resulting in:
 - Sub-millisecond timer precision.
 - Faster shutdown times.
 
-The transports supported are:  ``amqplib``, ``librabbitmq``, and ``redis``
+The transports supported are:  ``py-amqp`` ``librabbitmq``, ``redis``,
+and ``amqplib``.
 Hopefully this can be extended to include additional broker transports
 in the future.
 
@@ -122,7 +123,7 @@ by default if the eventloop is not used.
 New ``celery`` umbrella command
 -------------------------------
 
-All Celery's command line programs are now available from a single
+All Celery's command-line programs are now available from a single
 :program:`celery` umbrella command.
 
 You can see a list of subcommands and options by running:
@@ -701,7 +702,7 @@ In Other News
         class Worker(celery.Worker):
             ...
 
-- New signal: :signal:`task-success`.
+- New signal: :signal:`task_success`.
 
 - Multiprocessing logs are now only emitted if the :envvar:`MP_LOG`
   environment variable is set.
@@ -758,7 +759,7 @@ In Other News
         >>> import celery
         >>> print(celery.bugreport())
 
-    - Using the ``celery`` command-line program:
+    - Using the ``celery`` command line program:
 
         .. code-block:: bash
 
@@ -774,7 +775,7 @@ In Other News
 
 - Module ``celery.task.control`` moved to :mod:`celery.app.control`.
 
-- New signal: :signal:`task-revoked`
+- New signal: :signal:`task_revoked`
 
     Sent in the main process when the task is revoked or terminated.
 
@@ -909,7 +910,7 @@ Internals
 
 - Renamed module ``celery.abstract`` -> :mod:`celery.worker.bootsteps`.
 
-- Command-line docs are now parsed from the module docstrings.
+- Command line docs are now parsed from the module docstrings.
 
 - Test suite directory has been reorganized.
 

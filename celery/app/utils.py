@@ -10,9 +10,13 @@ from __future__ import absolute_import
 
 import os
 import platform as _platform
+import types
 
-from celery import datastructures
+from billiard import forking as _forking
+
 from celery import platforms
+from celery.five import items
+from celery.datastructures import ConfigurationView, DictAttribute
 from celery.utils.text import pretty
 from celery.utils.imports import qualname
 
@@ -30,7 +34,7 @@ settings -> transport:{transport} results:{results}
 """
 
 
-class Settings(datastructures.ConfigurationView):
+class Settings(ConfigurationView):
     """Celery settings object."""
 
     @property
@@ -61,6 +65,25 @@ class Settings(datastructures.ConfigurationView):
         """Returns the current configuration, but without defaults."""
         # the last stash is the default settings, so just skip that
         return Settings({}, self._order[:-1])
+
+    def _prepare_pickleable_changes(self):
+        # attempt to include keys from configuration modules,
+        # to work with multiprocessing execv/fork emulation.
+        # This is necessary when multiprocessing execv/fork emulation
+        # is enabled.  There may be a better way to do this, but attempts
+        # at forcing the subprocess to import the modules did not work out,
+        # because of some sys.path problem.  More at Issue #1126.
+        if _forking._forking_is_enabled:
+            return self.changes
+        R = {}
+        for d in reversed(self._order[:-1]):
+            if isinstance(d, DictAttribute):
+                d = object.__getattribute__(d, 'obj')
+                if isinstance(d, types.ModuleType):
+                    d = dict((k, v) for k, v in items(vars(d))
+                             if not k.startswith('__') and k.isupper())
+            R.update(d)
+        return R
 
     def find_option(self, name, namespace='celery'):
         """Search for option by name.
@@ -95,12 +118,13 @@ class Settings(datastructures.ConfigurationView):
     def humanize(self):
         """Returns a human readable string showing changes to the
         configuration."""
-        return '\n'.join('{0}: {1}'.format(key, pretty(value, width=50))
-                        for key, value in self.without_defaults().iteritems())
+        return '\n'.join(
+            '{0}: {1}'.format(key, pretty(value, width=50))
+            for key, value in items(self.without_defaults()))
 
 
 class AppPickler(object):
-    """Default application pickler/unpickler."""
+    """Old application pickler/unpickler (<= 3.0)."""
 
     def __call__(self, cls, *args):
         kwargs = self.build_kwargs(*args)
@@ -115,7 +139,7 @@ class AppPickler(object):
         return self.build_standard_kwargs(*args)
 
     def build_standard_kwargs(self, main, changes, loader, backend, amqp,
-            events, log, control, accept_magic_kwargs):
+                              events, log, control, accept_magic_kwargs):
         return dict(main=main, loader=loader, backend=backend, amqp=amqp,
                     changes=changes, events=events, log=log, control=control,
                     set_as_current=False,
@@ -126,7 +150,14 @@ class AppPickler(object):
 
 
 def _unpickle_app(cls, pickler, *args):
+    """Rebuild app for versions 2.5+"""
     return pickler()(cls, *args)
+
+
+def _unpickle_app_v2(cls, kwargs):
+    """Rebuild app for versions 3.1+"""
+    kwargs['set_as_current'] = False
+    return cls(**kwargs)
 
 
 def bugreport(app):

@@ -6,30 +6,28 @@
 
 Tasks are the building blocks of Celery applications.
 
-A task can be created out of any callable and defines what happens
-when the worker receives a particular message.
+A task is a class that can be created out of any callable. It performs
+dual roles in that it defines both what happens when a task is
+called (sends a message), and what happens when a worker receives that message.
 
-Every task has unique name which is referenced in the message,
-so that the worker can find the right task to execute.
+Every task class has a unique name, and this name is referenced in messages
+so that the worker can find the right function to execute.
 
-It's not a requirement, but it's a good idea to keep your tasks
-*idempotent*.  Idempotence means that a task can be applied multiple
-times without changing the result.
-
-This is important because the task message will not disappear
-until the message has been *acknowledged*. A worker can reserve
-many messages in advance and even if the worker is killed -- caused by a power failure
+A task message does not disappear
+until the message has been :term:`acknowledged` by a worker. A worker can reserve
+many messages in advance and even if the worker is killed -- caused by power failure
 or otherwise -- the message will be redelivered to another worker.
 
-But the worker cannot know if your tasks are idempotent, so the default
-behavior is to acknowledge the message in advance just before it's executed,
-this way a task that has been started will not be executed again.
+Ideally task functions should be :term:`idempotent`, which means that
+the function will not cause unintented effects even if called
+multiple times with the same arguments.
+Since the worker cannot detect if your tasks are idempotent, the default
+behavior is to acknowledge the message in advance, before it's executed,
+so that a task that has already been started is never executed again..
 
 If your task is idempotent you can set the :attr:`acks_late` option
-to have the worker acknowledge the message *after* that task has been
-executed instead.  This way the task will be redelivered to another
-worker, even if the task has already started executing before.
-See also the FAQ entry :ref:`faq-acks_late-vs-retry`.
+to have the worker acknowledge the message *after* the task returns
+instead.  See also the FAQ entry :ref:`faq-acks_late-vs-retry`.
 
 --
 
@@ -178,7 +176,7 @@ add the project directory to the Python path::
 
     import os
     import sys
-    sys.path.append(os.getcwd())
+    sys.path.append(os.path.dirname(os.path.basename(__file__)))
 
     INSTALLED_APPS = ('myapp', )
 
@@ -199,6 +197,9 @@ The request defines the following attributes:
 
 :taskset: The unique id of the taskset this task is a member of (if any).
 
+:chord: The unique id of the chord this task belongs to (if the task
+        is part of the header).
+
 :args: Positional arguments.
 
 :kwargs: Keyword arguments.
@@ -208,6 +209,14 @@ The request defines the following attributes:
 
 :is_eager: Set to :const:`True` if the task is executed locally in
            the client, and not by a worker.
+
+:eta: The original ETA of the task (if any).
+      This is in UTC time (depending on the :setting:`CELERY_ENABLE_UTC`
+      setting).
+
+:expires: The original expiry time of the task (if any).
+          This is in UTC time (depending on the :setting:`CELERY_ENABLE_UTC`
+          setting).
 
 :logfile: The file the worker logs to.  See `Logging`_.
 
@@ -221,6 +230,15 @@ The request defines the following attributes:
                 to resend the task to the same destination queue.
                 Availability of keys in this dict depends on the
                 message broker used.
+
+:called_directly: This flag is set to true if the task was not
+                  executed by the worker.
+
+:callbacks: A list of subtasks to be called if this task returns successfully.
+
+:errback: A list of subtasks to be called if this task fails.
+
+:utc: Set to true the caller has utc enabled (:setting:`CELERY_ENABLE_UTC`).
 
 
 An example task accessing information in the context is:
@@ -390,6 +408,10 @@ General
     exception will be raised.  *NOTE:* You have to call :meth:`~@Task.retry`
     manually, as it will not automatically retry on exception..
 
+    The default value is 3.
+    A value of :const:`None` will disable the retry limit and the
+    task will retry forever until it succeeds.
+
 .. attribute:: Task.default_retry_delay
 
     Default time in seconds before a retry of the task
@@ -398,11 +420,13 @@ General
 
 .. attribute:: Task.rate_limit
 
-    Set the rate limit for this task type, i.e. how many times in
-    a given period of time is the task allowed to run.
+    Set the rate limit for this task type which limits the number of tasks
+    that can be run in a given time frame.  Tasks will still complete when
+    a rate limit is in effect, but it may take some time before it's allowed to
+    start.
 
     If this is :const:`None` no rate limit is in effect.
-    If it is an integer, it is interpreted as "tasks per second".
+    If it is an integer or float, it is interpreted as "tasks per second".
 
     The rate limits can be specified in seconds, minutes or hours
     by appending `"/s"`, `"/m"` or `"/h"` to the value.
@@ -699,8 +723,8 @@ state metadata.  This can then be used to create e.g. progress bars.
 Creating pickleable exceptions
 ------------------------------
 
-A little known Python fact is that exceptions must behave a certain
-way to support being pickled.
+A rarely known Python fact is that exceptions must conform to some
+simple rules to support being serialized by the pickle module.
 
 Tasks that raise exceptions that are not pickleable will not work
 properly when Pickle is used as the serializer.
@@ -836,7 +860,7 @@ that can be added to tasks like this:
 
     @celery.task(base=DatabaseTask)
     def process_rows():
-        for row in self.db.table.all():
+        for row in process_rows.db.table.all():
             ...
 
 The ``db`` attribute of the ``process_rows`` task will then
@@ -1059,7 +1083,7 @@ Make your design asynchronous instead, for example by using *callbacks*.
     def update_page_info(url):
         # fetch_page -> parse_page -> store_page
         chain = fetch_page.s() | parse_page.s(url) | store_page_info.s(url)
-        chain.apply_async()
+        chain()
 
     @celery.task(ignore_result=True)
     def fetch_page(url):

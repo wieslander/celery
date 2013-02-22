@@ -360,7 +360,7 @@ Hands-on with the API
 ---------------------
 
 Celery comes with a tool called :program:`celery amqp`
-that is used for command-line access to the AMQP API, enabling access to
+that is used for command line access to the AMQP API, enabling access to
 administration tasks like creating/deleting queues and exchanges, purging
 queues or sending messages.  It can also be used for non-AMQP brokers,
 but different implementation may not implement all commands.
@@ -466,7 +466,7 @@ One for video, one for images and one default queue for everything else:
 
     CELERY_QUEUES = (
         Queue('default', default_exchange, routing_key='default'),
-        Queue('videos', media_exchange, routing_key='media.video')
+        Queue('videos', media_exchange, routing_key='media.video'),
         Queue('images', media_exchange, routing_key='media.image')
     )
     CELERY_DEFAULT_QUEUE = 'default'
@@ -572,8 +572,7 @@ copies of tasks to all workers connected to it:
 
     CELERY_QUEUES = (Broadcast('broadcast_tasks'), )
 
-    CELERY_ROUTES = {'tasks.reload_cache': 'broadcast_tasks'}
-
+    CELERY_ROUTES = {'tasks.reload_cache': {'queue': 'broadcast_tasks'}}
 
 Now the ``tasks.reload_tasks`` task will be sent to every
 worker consuming from this queue.

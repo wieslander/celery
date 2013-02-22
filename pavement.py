@@ -37,31 +37,6 @@ def qhtml(options):
 
 
 @task
-@needs('clean_docs', 'paver.doctools.html')
-def ghdocs(options):
-    builtdocs = sphinx_builddir(options)
-    sh("git checkout gh-pages && \
-            cp -r {0}/* .    && \
-            git commit . -m 'Rendered documentation for Github Pages.' && \
-            git push origin gh-pages && \
-            git checkout master".format(builtdocs))
-
-
-@task
-@needs('clean_docs', 'paver.doctools.html')
-def upload_pypi_docs(options):
-    builtdocs = path('docs') / options.builddir / 'html'
-    sh("{0} setup.py upload_sphinx --upload-dir='{1}'".format(
-        sys.executable, builtdocs))
-
-
-@task
-@needs('upload_pypi_docs', 'ghdocs')
-def upload_docs(options):
-    pass
-
-
-@task
 def autodoc(options):
     sh('extra/release/doc4allmods celery')
 
@@ -159,6 +134,13 @@ def pep8(options):
 def removepyc(options):
     sh('find . -type f -a \\( {0} \\) | xargs rm'.format(
         ' -o '.join("-name '{0}'".format(pat) for pat in PYCOMPILE_CACHES)))
+    sh('find . -type d -name "__pycache__" | xargs rm -r')
+
+
+@task
+def update_graphs(options):
+    sh('celery worker_graph | dot -Tpng -o docs/images/worker_graph.png')
+    sh('celery consumer_graph | dot -Tpng -o docs/images/consumer_graph.png')
 
 
 @task
@@ -177,12 +159,6 @@ def gitcleanforce(options):
 @needs('flakes', 'autodoc', 'verifyindex',
        'verifyconfigref', 'test', 'gitclean')
 def releaseok(options):
-    pass
-
-
-@task
-@needs('releaseok', 'removepyc', 'upload_docs')
-def release(options):
     pass
 
 

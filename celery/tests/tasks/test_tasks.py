@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+from collections import Callable
 from datetime import datetime, timedelta
 from functools import wraps
 from mock import patch
@@ -14,15 +15,21 @@ from celery.task import (
     periodic_task,
     PeriodicTask
 )
+from celery import current_app
 from celery.app import app_or_default
 from celery.exceptions import RetryTaskError
 from celery.execute import send_task
+from celery.five import items, range, string_t
 from celery.result import EagerResult
 from celery.schedules import crontab, crontab_parser, ParseException
 from celery.utils import uuid
 from celery.utils.timeutils import parse_iso8601, timedelta_seconds
 
 from celery.tests.utils import Case, with_eager_tasks, WhateverIO
+
+
+def now():
+    return current_app.now()
 
 
 def return_True(*args, **kwargs):
@@ -84,7 +91,7 @@ def retry_task_noargs(**kwargs):
 
 
 @task(max_retries=3, iterations=0, base=MockApplyTask,
-        accept_magic_kwargs=True)
+      accept_magic_kwargs=True)
 def retry_task_mockapply(arg1, arg2, kwarg=1, **kwargs):
     current.iterations += 1
 
@@ -136,27 +143,37 @@ class test_task_retries(Case):
         self.assertEqual(retry_task_noargs.iterations, 4)
 
     def test_retry_kwargs_can_be_empty(self):
-        with self.assertRaises(RetryTaskError):
-            retry_task_mockapply.retry(args=[4, 4], kwargs=None)
-
-    def test_retry_not_eager(self):
-        retry_task_mockapply.request.called_directly = False
-        exc = Exception('baz')
-        try:
-            retry_task_mockapply.retry(args=[4, 4], kwargs={'task_retries': 0},
-                                       exc=exc, throw=False)
-            self.assertTrue(retry_task_mockapply.__class__.applied)
-        finally:
-            retry_task_mockapply.__class__.applied = 0
-
+        retry_task_mockapply.push_request()
         try:
             with self.assertRaises(RetryTaskError):
+                retry_task_mockapply.retry(args=[4, 4], kwargs=None)
+        finally:
+            retry_task_mockapply.pop_request()
+
+    def test_retry_not_eager(self):
+        retry_task_mockapply.push_request()
+        try:
+            retry_task_mockapply.request.called_directly = False
+            exc = Exception('baz')
+            try:
                 retry_task_mockapply.retry(
                     args=[4, 4], kwargs={'task_retries': 0},
-                    exc=exc, throw=True)
-            self.assertTrue(retry_task_mockapply.__class__.applied)
+                    exc=exc, throw=False,
+                )
+                self.assertTrue(retry_task_mockapply.__class__.applied)
+            finally:
+                retry_task_mockapply.__class__.applied = 0
+
+            try:
+                with self.assertRaises(RetryTaskError):
+                    retry_task_mockapply.retry(
+                        args=[4, 4], kwargs={'task_retries': 0},
+                        exc=exc, throw=True)
+                self.assertTrue(retry_task_mockapply.__class__.applied)
+            finally:
+                retry_task_mockapply.__class__.applied = 0
         finally:
-            retry_task_mockapply.__class__.applied = 0
+            retry_task_mockapply.pop_request()
 
     def test_retry_with_kwargs(self):
         retry_task_customexc.__class__.max_retries = 3
@@ -228,21 +245,21 @@ class test_tasks(Case):
         self.assertEqual(result.id, task_id)
 
     def assertNextTaskDataEqual(self, consumer, presult, task_name,
-            test_eta=False, test_expires=False, **kwargs):
+                                test_eta=False, test_expires=False, **kwargs):
         next_task = consumer.queues[0].get()
         task_data = next_task.decode()
         self.assertEqual(task_data['id'], presult.id)
         self.assertEqual(task_data['task'], task_name)
         task_kwargs = task_data.get('kwargs', {})
         if test_eta:
-            self.assertIsInstance(task_data.get('eta'), basestring)
+            self.assertIsInstance(task_data.get('eta'), string_t)
             to_datetime = parse_iso8601(task_data.get('eta'))
             self.assertIsInstance(to_datetime, datetime)
         if test_expires:
-            self.assertIsInstance(task_data.get('expires'), basestring)
+            self.assertIsInstance(task_data.get('expires'), string_t)
             to_datetime = parse_iso8601(task_data.get('expires'))
             self.assertIsInstance(to_datetime, datetime)
-        for arg_name, arg_value in kwargs.items():
+        for arg_name, arg_value in items(kwargs):
             self.assertEqual(task_kwargs.get(arg_name), arg_value)
 
     def test_incomplete_task_cls(self):
@@ -265,10 +282,8 @@ class test_tasks(Case):
         T1 = self.createTask('c.unittest.t.t1')
         self.assertIsInstance(T1, BaseTask)
         self.assertTrue(T1.run())
-        self.assertTrue(callable(T1),
-                'Task class is callable()')
-        self.assertTrue(T1(),
-                'Task class runs run() when called')
+        self.assertTrue(isinstance(T1, Callable), 'Task class is callable()')
+        self.assertTrue(T1(), 'Task class runs run() when called')
 
         consumer = T1.get_consumer()
         with self.assertRaises(NotImplementedError):
@@ -282,26 +297,34 @@ class test_tasks(Case):
 
         # With arguments.
         presult2 = T1.apply_async(kwargs=dict(name='George Costanza'))
-        self.assertNextTaskDataEqual(consumer, presult2, T1.name,
-                name='George Costanza')
+        self.assertNextTaskDataEqual(
+            consumer, presult2, T1.name, name='George Costanza',
+        )
 
         # send_task
         sresult = send_task(T1.name, kwargs=dict(name='Elaine M. Benes'))
-        self.assertNextTaskDataEqual(consumer, sresult, T1.name,
-                name='Elaine M. Benes')
+        self.assertNextTaskDataEqual(
+            consumer, sresult, T1.name, name='Elaine M. Benes',
+        )
 
         # With eta.
-        presult2 = T1.apply_async(kwargs=dict(name='George Costanza'),
-                            eta=datetime.utcnow() + timedelta(days=1),
-                            expires=datetime.utcnow() + timedelta(days=2))
-        self.assertNextTaskDataEqual(consumer, presult2, T1.name,
-                name='George Costanza', test_eta=True, test_expires=True)
+        presult2 = T1.apply_async(
+            kwargs=dict(name='George Costanza'),
+            eta=now() + timedelta(days=1),
+            expires=now() + timedelta(days=2),
+        )
+        self.assertNextTaskDataEqual(
+            consumer, presult2, T1.name,
+            name='George Costanza', test_eta=True, test_expires=True,
+        )
 
         # With countdown.
         presult2 = T1.apply_async(kwargs=dict(name='George Costanza'),
                                   countdown=10, expires=12)
-        self.assertNextTaskDataEqual(consumer, presult2, T1.name,
-                name='George Costanza', test_eta=True, test_expires=True)
+        self.assertNextTaskDataEqual(
+            consumer, presult2, T1.name,
+            name='George Costanza', test_eta=True, test_expires=True,
+        )
 
         # Discarding all tasks.
         consumer.purge()
@@ -317,11 +340,16 @@ class test_tasks(Case):
         self.assertTrue(publisher.exchange)
 
     def test_context_get(self):
-        request = self.createTask('c.unittest.t.c.g').request
-        request.foo = 32
-        self.assertEqual(request.get('foo'), 32)
-        self.assertEqual(request.get('bar', 36), 36)
-        request.clear()
+        task = self.createTask('c.unittest.t.c.g')
+        task.push_request()
+        try:
+            request = task.request
+            request.foo = 32
+            self.assertEqual(request.get('foo'), 32)
+            self.assertEqual(request.get('bar', 36), 36)
+            request.clear()
+        finally:
+            task.pop_request()
 
     def test_task_class_repr(self):
         task = self.createTask('c.unittest.t.repr')
@@ -345,9 +373,13 @@ class test_tasks(Case):
 
     def test_after_return(self):
         task = self.createTask('c.unittest.t.after_return')
-        task.request.chord = return_True_task.s()
-        task.after_return('SUCCESS', 1.0, 'foobar', (), {}, None)
-        task.request.clear()
+        task.push_request()
+        try:
+            task.request.chord = return_True_task.s()
+            task.after_return('SUCCESS', 1.0, 'foobar', (), {}, None)
+            task.request.clear()
+        finally:
+            task.pop_request()
 
     def test_send_task_sent_event(self):
         T1 = self.createTask('c.unittest.t.t1')
@@ -388,15 +420,19 @@ class test_tasks(Case):
         def yyy():
             pass
 
-        tid = uuid()
-        yyy.update_state(tid, 'FROBULATING', {'fooz': 'baaz'})
-        self.assertEqual(yyy.AsyncResult(tid).status, 'FROBULATING')
-        self.assertDictEqual(yyy.AsyncResult(tid).result, {'fooz': 'baaz'})
+        yyy.push_request()
+        try:
+            tid = uuid()
+            yyy.update_state(tid, 'FROBULATING', {'fooz': 'baaz'})
+            self.assertEqual(yyy.AsyncResult(tid).status, 'FROBULATING')
+            self.assertDictEqual(yyy.AsyncResult(tid).result, {'fooz': 'baaz'})
 
-        yyy.request.id = tid
-        yyy.update_state(state='FROBUZATING', meta={'fooz': 'baaz'})
-        self.assertEqual(yyy.AsyncResult(tid).status, 'FROBUZATING')
-        self.assertDictEqual(yyy.AsyncResult(tid).result, {'fooz': 'baaz'})
+            yyy.request.id = tid
+            yyy.update_state(state='FROBUZATING', meta={'fooz': 'baaz'})
+            self.assertEqual(yyy.AsyncResult(tid).status, 'FROBUZATING')
+            self.assertDictEqual(yyy.AsyncResult(tid).result, {'fooz': 'baaz'})
+        finally:
+            yyy.pop_request()
 
     def test_repr(self):
 
@@ -416,13 +452,17 @@ class test_tasks(Case):
 
     def test_get_logger(self):
         t1 = self.createTask('c.unittest.t.t1')
-        logfh = WhateverIO()
-        logger = t1.get_logger(logfile=logfh, loglevel=0)
-        self.assertTrue(logger)
+        t1.push_request()
+        try:
+            logfh = WhateverIO()
+            logger = t1.get_logger(logfile=logfh, loglevel=0)
+            self.assertTrue(logger)
 
-        t1.request.loglevel = 3
-        logger = t1.get_logger(logfile=logfh, loglevel=None)
-        self.assertTrue(logger)
+            t1.request.loglevel = 3
+            logger = t1.get_logger(logfile=logfh, loglevel=None)
+            self.assertTrue(logger)
+        finally:
+            t1.pop_request()
 
 
 class test_TaskSet(Case):
@@ -462,8 +502,8 @@ class test_TaskSet(Case):
                                            'task': increment_counter.name,
                                            'id': subtask.id}, m)
             increment_counter(
-                    increment_by=m.get('kwargs', {}).get('increment_by'))
-        self.assertEqual(increment_counter.count, sum(xrange(1, 10)))
+                increment_by=m.get('kwargs', {}).get('increment_by'))
+        self.assertEqual(increment_counter.count, sum(range(1, 10)))
 
     def test_named_taskset(self):
         prefix = 'test_named_taskset-'
@@ -530,12 +570,13 @@ class test_periodic_tasks(Case):
             type('Foo', (PeriodicTask, ), {'__module__': __name__})
 
     def test_remaining_estimate(self):
+        s = my_periodic.run_every
         self.assertIsInstance(
-            my_periodic.run_every.remaining_estimate(datetime.utcnow()),
+            s.remaining_estimate(s.maybe_make_aware(now())),
             timedelta)
 
     def test_is_due_not_due(self):
-        due, remaining = my_periodic.run_every.is_due(datetime.utcnow())
+        due, remaining = my_periodic.run_every.is_due(now())
         self.assertFalse(due)
         # This assertion may fail if executed in the
         # first minute of an hour, thus 59 instead of 60
@@ -544,7 +585,7 @@ class test_periodic_tasks(Case):
     def test_is_due(self):
         p = my_periodic
         due, remaining = p.run_every.is_due(
-                datetime.utcnow() - p.run_every.run_every)
+            now() - p.run_every.run_every)
         self.assertTrue(due)
         self.assertEqual(remaining,
                          timedelta_seconds(p.run_every.run_every))
@@ -627,62 +668,82 @@ class test_crontab_parser(Case):
         self.assertEqual(crontab_parser(60).parse('*'), set(range(60)))
         self.assertEqual(crontab_parser(7).parse('*'), set(range(7)))
         self.assertEqual(crontab_parser(31, 1).parse('*'),
-                          set(range(1, 31 + 1)))
+                         set(range(1, 31 + 1)))
         self.assertEqual(crontab_parser(12, 1).parse('*'),
-                          set(range(1, 12 + 1)))
+                         set(range(1, 12 + 1)))
 
     def test_parse_range(self):
         self.assertEqual(crontab_parser(60).parse('1-10'),
-                          set(range(1, 10 + 1)))
+                         set(range(1, 10 + 1)))
         self.assertEqual(crontab_parser(24).parse('0-20'),
-                          set(range(0, 20 + 1)))
+                         set(range(0, 20 + 1)))
         self.assertEqual(crontab_parser().parse('2-10'),
-                          set(range(2, 10 + 1)))
+                         set(range(2, 10 + 1)))
         self.assertEqual(crontab_parser(60, 1).parse('1-10'),
-                          set(range(1, 10 + 1)))
+                         set(range(1, 10 + 1)))
+
+    def test_parse_range_wraps(self):
+        self.assertEqual(crontab_parser(12).parse('11-1'),
+                         set([11, 0, 1]))
+        self.assertEqual(crontab_parser(60, 1).parse('2-1'),
+                         set(range(1, 60 + 1)))
 
     def test_parse_groups(self):
         self.assertEqual(crontab_parser().parse('1,2,3,4'),
-                          set([1, 2, 3, 4]))
+                         set([1, 2, 3, 4]))
         self.assertEqual(crontab_parser().parse('0,15,30,45'),
-                          set([0, 15, 30, 45]))
+                         set([0, 15, 30, 45]))
         self.assertEqual(crontab_parser(min_=1).parse('1,2,3,4'),
-                          set([1, 2, 3, 4]))
+                         set([1, 2, 3, 4]))
 
     def test_parse_steps(self):
         self.assertEqual(crontab_parser(8).parse('*/2'),
-                          set([0, 2, 4, 6]))
+                         set([0, 2, 4, 6]))
         self.assertEqual(crontab_parser().parse('*/2'),
-                          set(i * 2 for i in xrange(30)))
+                         set(i * 2 for i in range(30)))
         self.assertEqual(crontab_parser().parse('*/3'),
-                          set(i * 3 for i in xrange(20)))
+                         set(i * 3 for i in range(20)))
         self.assertEqual(crontab_parser(8, 1).parse('*/2'),
-                          set([1, 3, 5, 7]))
+                         set([1, 3, 5, 7]))
         self.assertEqual(crontab_parser(min_=1).parse('*/2'),
-                          set(i * 2 + 1 for i in xrange(30)))
+                         set(i * 2 + 1 for i in range(30)))
         self.assertEqual(crontab_parser(min_=1).parse('*/3'),
-                          set(i * 3 + 1 for i in xrange(20)))
+                         set(i * 3 + 1 for i in range(20)))
 
     def test_parse_composite(self):
         self.assertEqual(crontab_parser(8).parse('*/2'), set([0, 2, 4, 6]))
         self.assertEqual(crontab_parser().parse('2-9/5'), set([2, 7]))
         self.assertEqual(crontab_parser().parse('2-10/5'), set([2, 7]))
+        self.assertEqual(
+            crontab_parser(min_=1).parse('55-5/3'),
+            set([55, 58, 1, 4]),
+        )
         self.assertEqual(crontab_parser().parse('2-11/5,3'), set([2, 3, 7]))
-        self.assertEqual(crontab_parser().parse('2-4/3,*/5,0-21/4'),
-                set([0, 2, 4, 5, 8, 10, 12, 15, 16,
-                     20, 25, 30, 35, 40, 45, 50, 55]))
-        self.assertEqual(crontab_parser().parse('1-9/2'),
-                set([1, 3, 5, 7, 9]))
+        self.assertEqual(
+            crontab_parser().parse('2-4/3,*/5,0-21/4'),
+            set([0, 2, 4, 5, 8, 10, 12, 15, 16,
+                 20, 25, 30, 35, 40, 45, 50, 55]),
+        )
+        self.assertEqual(
+            crontab_parser().parse('1-9/2'),
+            set([1, 3, 5, 7, 9]),
+        )
         self.assertEqual(crontab_parser(8, 1).parse('*/2'), set([1, 3, 5, 7]))
         self.assertEqual(crontab_parser(min_=1).parse('2-9/5'), set([2, 7]))
         self.assertEqual(crontab_parser(min_=1).parse('2-10/5'), set([2, 7]))
-        self.assertEqual(crontab_parser(min_=1).parse('2-11/5,3'),
-                set([2, 3, 7]))
-        self.assertEqual(crontab_parser(min_=1).parse('2-4/3,*/5,1-21/4'),
-                set([1, 2, 5, 6, 9, 11, 13, 16, 17,
-                     21, 26, 31, 36, 41, 46, 51, 56]))
-        self.assertEqual(crontab_parser(min_=1).parse('1-9/2'),
-                set([1, 3, 5, 7, 9]))
+        self.assertEqual(
+            crontab_parser(min_=1).parse('2-11/5,3'),
+            set([2, 3, 7]),
+        )
+        self.assertEqual(
+            crontab_parser(min_=1).parse('2-4/3,*/5,1-21/4'),
+            set([1, 2, 5, 6, 9, 11, 13, 16, 17,
+                 21, 26, 31, 36, 41, 46, 51, 56]),
+        )
+        self.assertEqual(
+            crontab_parser(min_=1).parse('1-9/2'),
+            set([1, 3, 5, 7, 9]),
+        )
 
     def test_parse_errors_on_empty_string(self):
         with self.assertRaises(ParseException):
@@ -699,6 +760,20 @@ class test_crontab_parser(Case):
     def test_parse_errors_on_negative_number(self):
         with self.assertRaises(ParseException):
             crontab_parser(60).parse('-20')
+
+    def test_parse_errors_on_lt_min(self):
+        crontab_parser(min_=1).parse('1')
+        with self.assertRaises(ValueError):
+            crontab_parser(12, 1).parse('0')
+        with self.assertRaises(ValueError):
+            crontab_parser(24, 1).parse('12-0')
+
+    def test_parse_errors_on_gt_max(self):
+        crontab_parser(1).parse('0')
+        with self.assertRaises(ValueError):
+            crontab_parser(1).parse('1')
+        with self.assertRaises(ValueError):
+            crontab_parser(60).parse('61-0')
 
     def test_expand_cronspec_eats_iterables(self):
         self.assertEqual(crontab._expand_cronspec(iter([1, 2, 3]), 100),
@@ -904,7 +979,7 @@ class test_crontab_remaining_estimate(Case):
 class test_crontab_is_due(Case):
 
     def setUp(self):
-        self.now = datetime.utcnow()
+        self.now = now()
         self.next_minute = 60 - self.now.second - 1e-6 * self.now.microsecond
 
     def test_default_crontab_spec(self):
@@ -1029,9 +1104,31 @@ class test_crontab_is_due(Case):
             else:
                 break
 
+    def assertRelativedelta(self, due, last_ran):
+        try:
+            from dateutil.relativedelta import relativedelta
+        except ImportError:
+            return
+        l1, d1, n1 = due.run_every.remaining_delta(last_ran)
+        l2, d2, n2 = due.run_every.remaining_delta(last_ran,
+                                                   ffwd=relativedelta)
+        if not isinstance(d1, relativedelta):
+            self.assertEqual(l1, l2)
+            for field, value in items(d1._fields()):
+                self.assertEqual(getattr(d1, field), value)
+            self.assertFalse(d2.years)
+            self.assertFalse(d2.months)
+            self.assertFalse(d2.days)
+            self.assertFalse(d2.leapdays)
+            self.assertFalse(d2.hours)
+            self.assertFalse(d2.minutes)
+            self.assertFalse(d2.seconds)
+            self.assertFalse(d2.microseconds)
+
     def test_every_minute_execution_is_due(self):
         last_ran = self.now - timedelta(seconds=61)
         due, remaining = every_minute.run_every.is_due(last_ran)
+        self.assertRelativedelta(every_minute, last_ran)
         self.assertTrue(due)
         self.seconds_almost_equal(remaining, self.next_minute, 1)
 
@@ -1068,97 +1165,97 @@ class test_crontab_is_due(Case):
     @patch_crontab_nowfun(hourly, datetime(2010, 5, 10, 10, 30))
     def test_every_hour_execution_is_due(self):
         due, remaining = hourly.run_every.is_due(
-                datetime(2010, 5, 10, 6, 30))
+            datetime(2010, 5, 10, 6, 30))
         self.assertTrue(due)
         self.assertEqual(remaining, 60 * 60)
 
     @patch_crontab_nowfun(hourly, datetime(2010, 5, 10, 10, 29))
     def test_every_hour_execution_is_not_due(self):
         due, remaining = hourly.run_every.is_due(
-                datetime(2010, 5, 10, 9, 30))
+            datetime(2010, 5, 10, 9, 30))
         self.assertFalse(due)
         self.assertEqual(remaining, 60)
 
     @patch_crontab_nowfun(quarterly, datetime(2010, 5, 10, 10, 15))
     def test_first_quarter_execution_is_due(self):
         due, remaining = quarterly.run_every.is_due(
-                            datetime(2010, 5, 10, 6, 30))
+            datetime(2010, 5, 10, 6, 30))
         self.assertTrue(due)
         self.assertEqual(remaining, 15 * 60)
 
     @patch_crontab_nowfun(quarterly, datetime(2010, 5, 10, 10, 30))
     def test_second_quarter_execution_is_due(self):
         due, remaining = quarterly.run_every.is_due(
-                            datetime(2010, 5, 10, 6, 30))
+            datetime(2010, 5, 10, 6, 30))
         self.assertTrue(due)
         self.assertEqual(remaining, 15 * 60)
 
     @patch_crontab_nowfun(quarterly, datetime(2010, 5, 10, 10, 14))
     def test_first_quarter_execution_is_not_due(self):
         due, remaining = quarterly.run_every.is_due(
-                            datetime(2010, 5, 10, 10, 0))
+            datetime(2010, 5, 10, 10, 0))
         self.assertFalse(due)
         self.assertEqual(remaining, 60)
 
     @patch_crontab_nowfun(quarterly, datetime(2010, 5, 10, 10, 29))
     def test_second_quarter_execution_is_not_due(self):
         due, remaining = quarterly.run_every.is_due(
-                            datetime(2010, 5, 10, 10, 15))
+            datetime(2010, 5, 10, 10, 15))
         self.assertFalse(due)
         self.assertEqual(remaining, 60)
 
     @patch_crontab_nowfun(daily, datetime(2010, 5, 10, 7, 30))
     def test_daily_execution_is_due(self):
         due, remaining = daily.run_every.is_due(
-                datetime(2010, 5, 9, 7, 30))
+            datetime(2010, 5, 9, 7, 30))
         self.assertTrue(due)
         self.assertEqual(remaining, 24 * 60 * 60)
 
     @patch_crontab_nowfun(daily, datetime(2010, 5, 10, 10, 30))
     def test_daily_execution_is_not_due(self):
         due, remaining = daily.run_every.is_due(
-                datetime(2010, 5, 10, 7, 30))
+            datetime(2010, 5, 10, 7, 30))
         self.assertFalse(due)
         self.assertEqual(remaining, 21 * 60 * 60)
 
     @patch_crontab_nowfun(weekly, datetime(2010, 5, 6, 7, 30))
     def test_weekly_execution_is_due(self):
         due, remaining = weekly.run_every.is_due(
-                datetime(2010, 4, 30, 7, 30))
+            datetime(2010, 4, 30, 7, 30))
         self.assertTrue(due)
         self.assertEqual(remaining, 7 * 24 * 60 * 60)
 
     @patch_crontab_nowfun(weekly, datetime(2010, 5, 7, 10, 30))
     def test_weekly_execution_is_not_due(self):
         due, remaining = weekly.run_every.is_due(
-                datetime(2010, 5, 6, 7, 30))
+            datetime(2010, 5, 6, 7, 30))
         self.assertFalse(due)
         self.assertEqual(remaining, 6 * 24 * 60 * 60 - 3 * 60 * 60)
 
     @patch_crontab_nowfun(monthly, datetime(2010, 5, 13, 7, 30))
     def test_monthly_execution_is_due(self):
         due, remaining = monthly.run_every.is_due(
-                datetime(2010, 4, 8, 7, 30))
+            datetime(2010, 4, 8, 7, 30))
         self.assertTrue(due)
         self.assertEqual(remaining, 28 * 24 * 60 * 60)
 
     @patch_crontab_nowfun(monthly, datetime(2010, 5, 9, 10, 30))
     def test_monthly_execution_is_not_due(self):
         due, remaining = monthly.run_every.is_due(
-                datetime(2010, 4, 8, 7, 30))
+            datetime(2010, 4, 8, 7, 30))
         self.assertFalse(due)
         self.assertEqual(remaining, 4 * 24 * 60 * 60 - 3 * 60 * 60)
 
     @patch_crontab_nowfun(yearly, datetime(2010, 3, 11, 7, 30))
     def test_yearly_execution_is_due(self):
         due, remaining = yearly.run_every.is_due(
-                datetime(2009, 3, 12, 7, 30))
+            datetime(2009, 3, 12, 7, 30))
         self.assertTrue(due)
         self.assertEqual(remaining, 364 * 24 * 60 * 60)
 
     @patch_crontab_nowfun(yearly, datetime(2010, 3, 7, 10, 30))
     def test_yearly_execution_is_not_due(self):
         due, remaining = yearly.run_every.is_due(
-                datetime(2009, 3, 12, 7, 30))
+            datetime(2009, 3, 12, 7, 30))
         self.assertFalse(due)
         self.assertEqual(remaining, 4 * 24 * 60 * 60 - 3 * 60 * 60)

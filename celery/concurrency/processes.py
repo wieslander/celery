@@ -20,6 +20,7 @@ from celery import platforms
 from celery import signals
 from celery._state import set_default_app
 from celery.concurrency.base import BasePool
+from celery.five import items
 from celery.task import trace
 
 #: List of signals to reset when a child process starts.
@@ -35,9 +36,6 @@ WORKER_SIGIGNORE = frozenset(['SIGINT'])
 
 def process_initializer(app, hostname):
     """Initializes the process so it can be used to process tasks."""
-    app.set_current()
-    set_default_app(app)
-    trace._tasks = app._tasks  # make sure this optimization is set.
     platforms.signals.reset(*WORKER_SIGRESET)
     platforms.signals.ignore(*WORKER_SIGIGNORE)
     platforms.set_mp_process_title('celeryd', hostname=hostname)
@@ -50,10 +48,16 @@ def process_initializer(app, hostname):
                   str(os.environ.get('CELERY_LOG_REDIRECT_LEVEL')))
     app.loader.init_worker()
     app.loader.init_worker_process()
-    app.finalize()
-
+    if os.environ.get('FORKED_BY_MULTIPROCESSING'):
+        # pool did execv after fork
+        trace.setup_worker_optimizations(app)
+    else:
+        app.set_current()
+        set_default_app(app)
+        app.finalize()
+        trace._tasks = app._tasks  # enables fast_trace_task optimization.
     from celery.task.trace import build_tracer
-    for name, task in app.tasks.iteritems():
+    for name, task in items(app.tasks):
         task.__trace__ = build_tracer(name, task, app.loader, hostname)
     signals.worker_process_init.send(sender=None)
 
@@ -121,7 +125,7 @@ class TaskPool(BasePool):
                 'timeouts': (self._pool.soft_timeout, self._pool.timeout)}
 
     def init_callbacks(self, **kwargs):
-        for k, v in kwargs.iteritems():
+        for k, v in items(kwargs):
             setattr(self._pool, k, v)
 
     def handle_timeouts(self):
@@ -142,4 +146,4 @@ class TaskPool(BasePool):
 
     @property
     def timers(self):
-        return {self.maintain_pool: 30.0}
+        return {self.maintain_pool: 5.0}

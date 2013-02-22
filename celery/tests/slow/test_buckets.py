@@ -4,12 +4,12 @@ import sys
 import time
 
 from functools import partial
-from itertools import chain, izip
-from Queue import Empty
+from itertools import chain
 
 from mock import Mock, patch
 
 from celery.app.registry import TaskRegistry
+from celery.five import Empty, range
 from celery.task.base import Task
 from celery.utils import timeutils
 from celery.utils import uuid
@@ -30,16 +30,16 @@ class MockJob(object):
 
     def __eq__(self, other):
         if isinstance(other, self.__class__):
-            return bool(self.id == other.id \
-                    and self.name == other.name \
-                    and self.args == other.args \
-                    and self.kwargs == other.kwargs)
+            return bool(self.id == other.id
+                        and self.name == other.name
+                        and self.args == other.args
+                        and self.kwargs == other.kwargs)
         else:
             return self == other
 
     def __repr__(self):
         return '<MockJob: task:%s id:%s args:%s kwargs:%s' % (
-                self.name, self.id, self.args, self.kwargs)
+            self.name, self.id, self.args, self.kwargs)
 
 
 class test_TokenBucketQueue(Case):
@@ -65,8 +65,8 @@ class test_TokenBucketQueue(Case):
         x = buckets.TokenBucketQueue(fill_rate=10)
         # 20 items should take at least one second to complete
         time_start = time.time()
-        [x.put(str(i)) for i in xrange(20)]
-        for i in xrange(20):
+        [x.put(str(i)) for i in range(20)]
+        for i in range(20):
             sys.stderr.write('.')
             x.wait()
         self.assertGreater(time.time() - time_start, 1.5)
@@ -102,13 +102,15 @@ class test_rate_limit_string(Case):
     @skip_if_disabled
     def test_conversion(self):
         self.assertEqual(timeutils.rate(999), 999)
+        self.assertEqual(timeutils.rate(7.5), 7.5)
+        self.assertEqual(timeutils.rate('2.5/s'), 2.5)
         self.assertEqual(timeutils.rate('1456/s'), 1456)
         self.assertEqual(timeutils.rate('100/m'),
-                          100 / 60.0)
+                         100 / 60.0)
         self.assertEqual(timeutils.rate('10/h'),
-                          10 / 60.0 / 60.0)
+                         10 / 60.0 / 60.0)
 
-        for zero in (0, None, '0', '0/m', '0/h', '0/s'):
+        for zero in (0, None, '0', '0/m', '0/h', '0/s', '0.0/s'):
             self.assertEqual(timeutils.rate(zero), 0)
 
 
@@ -210,10 +212,10 @@ class test_TaskBucket(Case):
     def test_auto_add_on_missing(self):
         b = buckets.TaskBucket(task_registry=self.registry)
         for task_cls in self.task_classes:
-            self.assertIn(task_cls.name, b.buckets.keys())
+            self.assertIn(task_cls.name, list(b.buckets.keys()))
         self.registry.register(TaskD)
         self.assertTrue(b.get_bucket_for_type(TaskD.name))
-        self.assertIn(TaskD.name, b.buckets.keys())
+        self.assertIn(TaskD.name, list(b.buckets.keys()))
         self.registry.unregister(TaskD)
 
     @skip_if_disabled
@@ -249,7 +251,7 @@ class test_TaskBucket(Case):
         b = buckets.TaskBucket(task_registry=self.registry)
 
         cjob = lambda i: MockJob(uuid(), TaskA.name, [i], {})
-        jobs = [cjob(i) for i in xrange(20)]
+        jobs = [cjob(i) for i in range(20)]
         [b.put(job) for job in jobs]
 
         self.assertEqual(b.qsize(), 20)
@@ -266,14 +268,14 @@ class test_TaskBucket(Case):
         b = buckets.TaskBucket(task_registry=self.registry)
 
         cjob = lambda i, t: MockJob(uuid(), t.name, [i], {})
-        ajobs = [cjob(i, TaskA) for i in xrange(10)]
-        bjobs = [cjob(i, TaskB) for i in xrange(20)]
-        jobs = list(chain(*izip(bjobs, ajobs)))
+        ajobs = [cjob(i, TaskA) for i in range(10)]
+        bjobs = [cjob(i, TaskB) for i in range(20)]
+        jobs = list(chain(*zip(bjobs, ajobs)))
         for job in jobs:
             b.put(job)
 
         got_ajobs = 0
-        for job in (b.get() for i in xrange(20)):
+        for job in (b.get() for i in range(20)):
             if job.name == TaskA.name:
                 got_ajobs += 1
 
@@ -287,13 +289,13 @@ class test_TaskBucket(Case):
 
             cjob = lambda i, t: MockJob(uuid(), t.name, [i], {})
 
-            ajobs = [cjob(i, TaskA) for i in xrange(10)]
-            bjobs = [cjob(i, TaskB) for i in xrange(10)]
-            cjobs = [cjob(i, TaskC) for i in xrange(10)]
-            djobs = [cjob(i, TaskD) for i in xrange(10)]
+            ajobs = [cjob(i, TaskA) for i in range(10)]
+            bjobs = [cjob(i, TaskB) for i in range(10)]
+            cjobs = [cjob(i, TaskC) for i in range(10)]
+            djobs = [cjob(i, TaskD) for i in range(10)]
 
             # Spread the jobs around.
-            jobs = list(chain(*izip(ajobs, bjobs, cjobs, djobs)))
+            jobs = list(chain(*zip(ajobs, bjobs, cjobs, djobs)))
 
             [b.put(job) for job in jobs]
             for i, job in enumerate(jobs):

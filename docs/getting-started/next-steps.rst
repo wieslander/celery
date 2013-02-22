@@ -78,7 +78,7 @@ The :program:`celery` program can be used to start the worker:
 
 When the worker starts you should see a banner and some messages::
 
-     -------------- celery@halcyon.local v3.0 (Chiastic Slide)
+     -------------- celery@halcyon.local v3.1 (Cipater)
      ---- **** -----
      --- * ***  * -- [Configuration]
      -- * - **** --- . broker:      amqp://guest@localhost:5672//
@@ -93,7 +93,7 @@ When the worker starts you should see a banner and some messages::
      [2012-06-08 16:23:51,078: WARNING/MainProcess] celery@halcyon.local has started.
 
 -- The *broker* is the URL you specifed in the broker argument in our ``celery``
-module, you can also specify a different broker on the command line by using
+module, you can also specify a different broker on the command-line by using
 the :option:`-b` option.
 
 -- *Concurrency* is the number of multiprocessing worker process used
@@ -115,8 +115,8 @@ Eventlet, Gevent, and threads (see :ref:`concurrency`).
 -- *Events* is an option that when enabled causes Celery to send
 monitoring messages (events) for actions occurring in the worker.
 These can be used by monitor programs like ``celery events``,
-celerymon and the Django-Celery admin monitor that you can read
-about in the :ref:`Monitoring and Management guide <guide-monitoring>`.
+and Flower - the real-time Celery monitor, which you can read about in
+the :ref:`Monitoring and Management guide <guide-monitoring>`.
 
 -- *Queues* is the list of queues that the worker will consume
 tasks from.  The worker can be told to consume from several queues
@@ -125,7 +125,7 @@ as a means for Quality of Service, separation of concerns,
 and emulating priorities, all described in the :ref:`Routing Guide
 <guide-routing>`.
 
-You can get a complete list of command line arguments
+You can get a complete list of command-line arguments
 by passing in the `--help` flag:
 
 .. code-block:: bash
@@ -152,7 +152,7 @@ start one or more workers in the background:
 .. code-block:: bash
 
     $ celery multi start w1 -A proj -l info
-    celeryd-multi v3.0.0 (Chiastic Slide)
+    celery multi v3.1.0 (Cipater)
     > Starting nodes...
         > w1.halcyon.local: OK
 
@@ -161,13 +161,13 @@ You can restart it too:
 .. code-block:: bash
 
     $ celery multi restart w1 -A proj -l info
-    celeryd-multi v3.0.0 (Chiastic Slide)
+    celery multi v3.1.0 (Cipater)
     > Stopping nodes...
         > w1.halcyon.local: TERM -> 64024
     > Waiting for 1 node.....
         > w1.halcyon.local: OK
     > Restarting node w1.halcyon.local: OK
-    celeryd-multi v3.0.0 (Chiastic Slide)
+    celery multi v3.1.0 (Cipater)
     > Stopping nodes...
         > w1.halcyon.local: TERM -> 64052
 
@@ -177,12 +177,20 @@ or stop it:
 
     $ celery multi stop -w1 -A proj -l info
 
+The ``stop`` command is asynchronous so it will not wait for the
+worker to shutdown.  You will probably want to use the ``stopwait`` command
+instead which will ensure all currently executing tasks is completed:
+
+.. code-block:: bash
+
+    $ celery multi stopwait -w1 -A proj -l info
+
 .. note::
 
     :program:`celery multi` doesn't store information about workers
-    so you need to use the same command line parameters when restarting.
-    Also the same pidfile and logfile arguments must be used when
-    stopping/killing.
+    so you need to use the same command-line arguments when
+    restarting.  Only the same pidfile and logfile arguments must be
+    used when stopping.
 
 By default it will create pid and log files in the current directory,
 to protect against multiple workers launching on top of each other
@@ -196,15 +204,15 @@ you are encouraged to put these in a dedicated directory:
                                             --logfile=/var/log/celery/%n.pid
 
 With the multi command you can start multiple workers, and there is a powerful
-command line syntax to specify arguments for different workers too,
+command-line syntax to specify arguments for different workers too,
 e.g:
 
 .. code-block:: bash
 
-    $ celeryd multi start 10 -A proj -l info -Q:1-3 images,video -Q:4,5 data \
+    $ celery multi start 10 -A proj -l info -Q:1-3 images,video -Q:4,5 data \
         -Q default -L:4,5 debug
 
-For more examples see the :mod:`~celery.bin.celeryd_multi` module in the API
+For more examples see the :mod:`~celery.bin.multi` module in the API
 reference.
 
 .. _app-argument:
@@ -390,14 +398,14 @@ an argument signature specified.  The ``add`` task takes two arguments,
 so a subtask specifying two arguments would make a complete signature::
 
     >>> s1 = add.s(2, 2)
-    >>> res = s2.delay()
+    >>> res = s1.delay()
     >>> res.get()
     4
 
 But, you can also make incomplete signatures to create what we call
 *partials*::
 
-    # incomplete partial:  add(?, 2)
+    # incomplete partial: add(?, 2)
     >>> s2 = add.s(2)
 
 ``s2`` is now a partial subtask that needs another argument to be complete,
@@ -490,7 +498,7 @@ is called:
 
 .. code-block:: python
 
-    >>> from celery imoport chain
+    >>> from celery import chain
     >>> from proj.tasks import add, mul
 
     # (4 + 4) * 8
@@ -675,15 +683,7 @@ All times and dates, internally and in messages uses the UTC timezone.
 When the worker receives a message, for example with a countdown set it
 converts that UTC time to local time.  If you wish to use
 a different timezone than the system timezone then you must
-configure that using the :setting:`CELERY_TIMEZONE` setting.
-
-To use custom timezones you also have to install the :mod:`pytz` library:
-
-.. code-block:: bash
-
-    $ pip install pytz
-
-Setting a custom timezone::
+configure that using the :setting:`CELERY_TIMEZONE` setting::
 
     celery.conf.CELERY_TIMEZONE = 'Europe/London'
 

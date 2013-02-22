@@ -10,13 +10,15 @@ from __future__ import absolute_import
 
 import os
 
+from collections import Callable
+
 from celery.local import Proxy
 from celery import _state
 from celery._state import (  # noqa
-        set_default_app,
-        get_current_app as current_app,
-        get_current_task as current_task,
-        _get_active_apps,
+    set_default_app,
+    get_current_app as current_app,
+    get_current_task as current_task,
+    _get_active_apps,
 )
 from celery.utils import gen_task_name
 
@@ -34,12 +36,9 @@ default_app = Proxy(lambda: _state.default_app)
 app_or_default = None
 
 #: The 'default' loader is the default loader used by old applications.
-default_loader = os.environ.get('CELERY_LOADER') or 'default'
-
-#: Global fallback app instance.
-set_default_app(Celery('default', loader=default_loader,
-                                  set_as_current=False,
-                                  accept_magic_kwargs=True))
+#: This is deprecated and should no longer be used as it's set too early
+#: to be affected by --loader argument.
+default_loader = os.environ.get('CELERY_LOADER') or 'default'  # XXX
 
 
 def bugreport():
@@ -127,11 +126,12 @@ def shared_task(*args, **kwargs):
             # apps task registry.
             def task_by_cons():
                 app = current_app()
-                return app.tasks[name or gen_task_name(app,
-                            fun.__name__, fun.__module__)]
+                return app.tasks[
+                    name or gen_task_name(app, fun.__name__, fun.__module__)
+                ]
             return Proxy(task_by_cons)
         return __inner
 
-    if len(args) == 1 and callable(args[0]):
+    if len(args) == 1 and isinstance(args[0], Callable):
         return create_shared_task(**kwargs)(args[0])
     return create_shared_task(**kwargs)

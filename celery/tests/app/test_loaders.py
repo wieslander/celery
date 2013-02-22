@@ -9,10 +9,11 @@ from mock import Mock, patch
 from celery import loaders
 from celery.app import app_or_default
 from celery.exceptions import (
-        NotConfigured,
-        ImproperlyConfigured,
-        CPendingDeprecationWarning,
+    NotConfigured,
+    ImproperlyConfigured,
+    CPendingDeprecationWarning,
 )
+from celery.five import items
 from celery.loaders import base
 from celery.loaders import default
 from celery.loaders.app import AppLoader
@@ -33,7 +34,7 @@ dict_config = dict(FOO=10, BAR=20)
 class Object(object):
 
     def __init__(self, **kwargs):
-        for k, v in kwargs.items():
+        for k, v in items(kwargs):
             setattr(self, k, v)
 
 
@@ -48,15 +49,17 @@ class test_loaders(AppCase):
     def test_get_loader_cls(self):
 
         self.assertEqual(loaders.get_loader_cls('default'),
-                          default.Loader)
+                         default.Loader)
 
     def test_current_loader(self):
-        with self.assertWarnsRegex(CPendingDeprecationWarning,
+        with self.assertWarnsRegex(
+                CPendingDeprecationWarning,
                 r'deprecation'):
             self.assertIs(loaders.current_loader(), self.app.loader)
 
     def test_load_settings(self):
-        with self.assertWarnsRegex(CPendingDeprecationWarning,
+        with self.assertWarnsRegex(
+                CPendingDeprecationWarning,
                 r'deprecation'):
             self.assertIs(loaders.load_settings(), self.app.conf)
 
@@ -101,12 +104,13 @@ class test_LoaderBase(Case):
 
     def test_import_default_modules(self):
         modnames = lambda l: [m.__name__ for m in l]
-        prev, self.app.conf.CELERY_IMPORTS = \
-                self.app.conf.CELERY_IMPORTS, ('os', 'sys')
+        prev, self.app.conf.CELERY_IMPORTS = (
+            self.app.conf.CELERY_IMPORTS, ('os', 'sys'))
         try:
-            self.assertEqual(sorted(modnames(
-                                self.loader.import_default_modules())),
-                            sorted(modnames([os, sys])))
+            self.assertEqual(
+                sorted(modnames(self.loader.import_default_modules())),
+                sorted(modnames([os, sys])),
+            )
         finally:
             self.app.conf.CELERY_IMPORTS = prev
 
@@ -153,22 +157,14 @@ class test_LoaderBase(Case):
 
 class test_DefaultLoader(Case):
 
-    def test_wanted_module_item(self):
-        l = default.Loader()
-        self.assertTrue(l.wanted_module_item('FOO'))
-        self.assertTrue(l.wanted_module_item('Foo'))
-        self.assertFalse(l.wanted_module_item('_FOO'))
-        self.assertFalse(l.wanted_module_item('__FOO'))
-        self.assertTrue(l.wanted_module_item('foo'))
-
-    @patch('celery.loaders.default.find_module')
+    @patch('celery.loaders.base.find_module')
     def test_read_configuration_not_a_package(self, find_module):
         find_module.side_effect = NotAPackage()
         l = default.Loader()
         with self.assertRaises(NotAPackage):
             l.read_configuration()
 
-    @patch('celery.loaders.default.find_module')
+    @patch('celery.loaders.base.find_module')
     def test_read_configuration_py_in_name(self, find_module):
         prev = os.environ['CELERY_CONFIG_MODULE']
         os.environ['CELERY_CONFIG_MODULE'] = 'celeryconfig.py'
@@ -180,7 +176,7 @@ class test_DefaultLoader(Case):
         finally:
             os.environ['CELERY_CONFIG_MODULE'] = prev
 
-    @patch('celery.loaders.default.find_module')
+    @patch('celery.loaders.base.find_module')
     def test_read_configuration_importerror(self, find_module):
         default.C_WNOCONF = True
         find_module.side_effect = ImportError()
@@ -238,7 +234,7 @@ class test_DefaultLoader(Case):
 
         with warnings.catch_warnings(record=True):
             l = _Loader()
-            self.assertDictEqual(l.conf, {})
+            self.assertFalse(l.configured)
             context_executed[0] = True
         self.assertTrue(context_executed[0])
 
@@ -270,8 +266,8 @@ class test_AppLoader(Case):
         self.assertEqual(self.loader.conf['BAR'], 20)
 
     def test_on_worker_init(self):
-        prev, self.app.conf.CELERY_IMPORTS = \
-                self.app.conf.CELERY_IMPORTS, ('subprocess', )
+        prev, self.app.conf.CELERY_IMPORTS = (
+            self.app.conf.CELERY_IMPORTS, ('subprocess', ))
         try:
             sys.modules.pop('subprocess', None)
             self.loader.init_worker()

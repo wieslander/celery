@@ -3,7 +3,7 @@
     celery.bin.celeryd_detach
     ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    Program used to daemonize celeryd.
+    Program used to daemonize the worker
 
     Using :func:`os.execv` because forking and multiprocessing
     leads to weird issues (it was a long time ago now, but it
@@ -26,9 +26,10 @@ from celery.bin.base import daemon_options, Option
 logger = get_logger(__name__)
 
 OPTION_LIST = daemon_options(default_pidfile='celeryd.pid') + (
-                Option('--fake',
-                       default=False, action='store_true', dest='fake',
-                       help="Don't fork (for debugging purposes)"), )
+    Option('--fake',
+           default=False, action='store_true', dest='fake',
+           help="Don't fork (for debugging purposes)"),
+)
 
 
 def detach(path, argv, logfile=None, pidfile=None, uid=None,
@@ -75,7 +76,7 @@ class PartialOptionParser(OptionParser):
                         self.error('{0} requires an argument'.format(opt))
                     else:
                         self.error('{0} requires {1} arguments'.format(
-                                    opt, nargs))
+                            opt, nargs))
                 elif nargs == 1:
                     value = rargs.pop(0)
                 else:
@@ -104,11 +105,11 @@ class detached_celeryd(object):
     option_list = OPTION_LIST
     usage = '%prog [options] [celeryd options]'
     version = celery.VERSION_BANNER
-    description = ('Detaches Celery worker nodes.  See `celeryd --help` '
+    description = ('Detaches Celery worker nodes.  See `celery worker --help` '
                    'for the list of supported worker arguments.')
     command = sys.executable
     execv_path = sys.executable
-    execv_argv = ['-m', 'celery.bin.celeryd']
+    execv_argv = ['-m', 'celery', 'worker']
 
     def Parser(self, prog_name):
         return PartialOptionParser(prog=prog_name,
@@ -142,7 +143,7 @@ class detached_celeryd(object):
         options, values, leftovers = self.parse_options(prog_name, argv[1:])
         sys.exit(detach(path=self.execv_path,
                  argv=self.execv_argv + leftovers + config,
-                  **vars(options)))
+                 **vars(options)))
 
 
 def main():

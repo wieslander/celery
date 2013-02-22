@@ -1,4 +1,4 @@
-from __future__ import absolute_import
+from __future__ import absolute_import, unicode_literals
 
 from datetime import datetime
 
@@ -21,7 +21,7 @@ from celery.tests.utils import (
 try:
     import sqlalchemy  # noqa
 except ImportError:
-    DatabaseBackend = Task = TaskSet = None
+    DatabaseBackend = Task = TaskSet = None  # noqa
 else:
     from celery.backends.database import DatabaseBackend
     from celery.backends.database.models import Task, TaskSet
@@ -66,8 +66,8 @@ class test_DatabaseBackend(Case):
             'status': states.PENDING,
             'task_id': 'xxx-does-not-exist-at-all',
             'result': None,
-            'traceback': None,
-            }, tb.get_task_meta('xxx-does-not-exist-at-all'))
+            'traceback': None
+        }, tb.get_task_meta('xxx-does-not-exist-at-all'))
 
     def test_mark_as_done(self):
         tb = DatabaseBackend()
@@ -113,9 +113,9 @@ class test_DatabaseBackend(Case):
             import traceback
             trace = '\n'.join(traceback.format_stack())
             tb.mark_as_retry(tid, exception, traceback=trace)
-        self.assertEqual(tb.get_status(tid), states.RETRY)
-        self.assertIsInstance(tb.get_result(tid), KeyError)
-        self.assertEqual(tb.get_traceback(tid), trace)
+            self.assertEqual(tb.get_status(tid), states.RETRY)
+            self.assertIsInstance(tb.get_result(tid), KeyError)
+            self.assertEqual(tb.get_traceback(tid), trace)
 
     def test_mark_as_failure(self):
         tb = DatabaseBackend()
@@ -127,9 +127,9 @@ class test_DatabaseBackend(Case):
             import traceback
             trace = '\n'.join(traceback.format_stack())
             tb.mark_as_failure(tid3, exception, traceback=trace)
-        self.assertEqual(tb.get_status(tid3), states.FAILURE)
-        self.assertIsInstance(tb.get_result(tid3), KeyError)
-        self.assertEqual(tb.get_traceback(tid3), trace)
+            self.assertEqual(tb.get_status(tid3), states.FAILURE)
+            self.assertIsInstance(tb.get_result(tid3), KeyError)
+            self.assertEqual(tb.get_traceback(tid3), trace)
 
     def test_forget(self):
         tb = DatabaseBackend(backend='memory://')
@@ -152,7 +152,7 @@ class test_DatabaseBackend(Case):
         tb = DatabaseBackend()
 
         tid = uuid()
-        res = {u'something': 'special'}
+        res = {'something': 'special'}
         self.assertEqual(tb.save_group(tid, res), res)
 
         res2 = tb.restore_group(tid)

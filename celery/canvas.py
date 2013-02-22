@@ -11,14 +11,16 @@
 """
 from __future__ import absolute_import
 
+from copy import deepcopy
+from functools import partial as _partial
 from operator import itemgetter
-from itertools import chain as _chain, imap
+from itertools import chain as _chain
 
-from kombu.utils import fxrange, kwdict, reprcall
+from kombu.utils import cached_property, fxrange, kwdict, reprcall, uuid
 
 from celery import current_app
 from celery.local import Proxy
-from celery.utils import cached_property, uuid
+from celery.result import AsyncResult, GroupResult
 from celery.utils.functional import (
     maybe_list, is_list, regen,
     chunks as _chunks,
@@ -79,7 +81,7 @@ class Signature(dict):
         return Signature(d)
 
     def __init__(self, task=None, args=None, kwargs=None, options=None,
-                type=None, subtask_type=None, immutable=False, **ex):
+                 type=None, subtask_type=None, immutable=False, **ex):
         init = dict.__init__
 
         if isinstance(task, dict):
@@ -93,11 +95,12 @@ class Signature(dict):
         else:
             self._type = task
 
-        init(self, task=task_name, args=tuple(args or ()),
-                                   kwargs=kwargs or {},
-                                   options=dict(options or {}, **ex),
-                                   subtask_type=subtask_type,
-                                   immutable=immutable)
+        init(self,
+             task=task_name, args=tuple(args or ()),
+             kwargs=kwargs or {},
+             options=dict(options or {}, **ex),
+             subtask_type=subtask_type,
+             immutable=immutable)
 
     def __call__(self, *partial_args, **partial_kwargs):
         return self.apply_async(partial_args, partial_kwargs)
@@ -116,15 +119,24 @@ class Signature(dict):
                 dict(self.kwargs, **kwargs) if kwargs else self.kwargs,
                 dict(self.options, **options) if options else self.options)
 
-    def clone(self, args=(), kwargs={}, **options):
-        args, kwargs, options = self._merge(args, kwargs, options)
-        s = Signature.from_dict({'task': self.task, 'args': args,
-                                 'kwargs': kwargs, 'options': options,
+    def clone(self, args=(), kwargs={}, **opts):
+        # need to deepcopy options so origins links etc. is not modified.
+        args, kwargs, opts = self._merge(args, kwargs, opts)
+        s = Signature.from_dict({'task': self.task, 'args': tuple(args),
+                                 'kwargs': kwargs, 'options': deepcopy(opts),
                                  'subtask_type': self.subtask_type,
                                  'immutable': self.immutable})
         s._type = self._type
         return s
     partial = clone
+
+    def _freeze(self, _id=None):
+        opts = self.options
+        try:
+            tid = opts['task_id']
+        except KeyError:
+            tid = opts['task_id'] = _id or uuid()
+        return self.AsyncResult(tid)
 
     def replace(self, args=None, kwargs=None, options=None):
         s = self.clone()
@@ -145,7 +157,7 @@ class Signature(dict):
     def apply_async(self, args=(), kwargs={}, **options):
         # For callbacks: extra args are prepended to the stored args.
         args, kwargs, options = self._merge(args, kwargs, options)
-        return self.type.apply_async(args, kwargs, **options)
+        return self._apply_async(args, kwargs, **options)
 
     def append_to_list_option(self, key, value):
         items = self.options.setdefault(key, [])
@@ -160,9 +172,11 @@ class Signature(dict):
         return self.append_to_list_option('link_error', errback)
 
     def flatten_links(self):
-        return list(_chain.from_iterable(_chain([[self]],
-                (link.flatten_links()
-                    for link in maybe_list(self.options.get('link')) or []))))
+        return list(_chain.from_iterable(_chain(
+            [[self]],
+            (link.flatten_links()
+                for link in maybe_list(self.options.get('link')) or [])
+        )))
 
     def __or__(self, other):
         if not isinstance(self, chain) and isinstance(other, chain):
@@ -174,6 +188,10 @@ class Signature(dict):
                 return chain(*self.tasks + (other, ))
             return chain(self, other)
         return NotImplemented
+
+    def __deepcopy__(self, memo):
+        memo[id(self)] = self
+        return dict(self)
 
     def __invert__(self):
         return self.apply_async().get()
@@ -187,12 +205,37 @@ class Signature(dict):
         args, kwargs, _ = self._merge(args, kwargs, {})
         return reprcall(self['task'], args, kwargs)
 
+    def election(self):
+        type = self.type
+        app = type.app
+        tid = self.options.get('task_id') or uuid()
+
+        with app.producer_or_acquire(None) as P:
+            props = type.backend.on_task_call(P, tid)
+            app.control.election(tid, 'task', self.clone(task_id=tid, **props),
+                                 connection=P.connection)
+            return type.AsyncResult(tid)
+
     def __repr__(self):
         return self.reprcall()
 
     @cached_property
     def type(self):
         return self._type or current_app.tasks[self['task']]
+
+    @cached_property
+    def AsyncResult(self):
+        try:
+            return self.type.AsyncResult
+        except KeyError:  # task not registered
+            return AsyncResult
+
+    @cached_property
+    def _apply_async(self):
+        try:
+            return self.type.apply_async
+        except KeyError:
+            return _partial(current_app.send_task, self['task'])
     task = _getitem_property('task')
     args = _getitem_property('args')
     kwargs = _getitem_property('kwargs')
@@ -205,8 +248,9 @@ class chain(Signature):
 
     def __init__(self, *tasks, **options):
         tasks = tasks[0] if len(tasks) == 1 and is_list(tasks[0]) else tasks
-        Signature.__init__(self,
-            'celery.chain', (), {'tasks': tasks}, **options)
+        Signature.__init__(
+            self, 'celery.chain', (), {'tasks': tasks}, **options
+        )
         self.tasks = tasks
         self.subtask_type = 'chain'
 
@@ -215,10 +259,14 @@ class chain(Signature):
 
     @classmethod
     def from_dict(self, d):
+        tasks = d['kwargs']['tasks']
+        if d['args'] and tasks:
+            # partial args passed on to first task in chain (Issue #1057).
+            tasks[0]['args'] = d['args'] + tasks[0]['args']
         return chain(*d['kwargs']['tasks'], **kwdict(d['options']))
 
     def __repr__(self):
-        return ' | '.join(imap(repr, self.tasks))
+        return ' | '.join(map(repr, self.tasks))
 Signature.register_type(chain)
 
 
@@ -227,14 +275,17 @@ class _basemap(Signature):
     _unpack_args = itemgetter('task', 'it')
 
     def __init__(self, task, it, **options):
-        Signature.__init__(self, self._task_name, (),
-                {'task': task, 'it': regen(it)}, immutable=True, **options)
+        Signature.__init__(
+            self, self._task_name, (),
+            {'task': task, 'it': regen(it)}, immutable=True, **options
+        )
 
     def apply_async(self, args=(), kwargs={}, **opts):
         # need to evaluate generators
         task, it = self._unpack_args(self.kwargs)
-        return self.type.apply_async((),
-                {'task': task, 'it': list(it)}, **opts)
+        return self.type.apply_async(
+            (), {'task': task, 'it': list(it)}, **opts
+        )
 
     @classmethod
     def from_dict(self, d):
@@ -265,9 +316,11 @@ class chunks(Signature):
     _unpack_args = itemgetter('task', 'it', 'n')
 
     def __init__(self, task, it, n, **options):
-        Signature.__init__(self, 'celery.chunks', (),
-                {'task': task, 'it': regen(it), 'n': n},
-                immutable=True, **options)
+        Signature.__init__(
+            self, 'celery.chunks', (),
+            {'task': task, 'it': regen(it), 'n': n},
+            immutable=True, **options
+        )
 
     @classmethod
     def from_dict(self, d):
@@ -303,23 +356,44 @@ class group(Signature):
     def __init__(self, *tasks, **options):
         if len(tasks) == 1:
             tasks = _maybe_group(tasks[0])
-        Signature.__init__(self,
-            'celery.group', (), {'tasks': tasks}, **options)
+        Signature.__init__(
+            self, 'celery.group', (), {'tasks': tasks}, **options
+        )
         self.tasks, self.subtask_type = tasks, 'group'
 
     @classmethod
     def from_dict(self, d):
-        return group(d['kwargs']['tasks'], **kwdict(d['options']))
+        tasks = d['kwargs']['tasks']
+        if d['args'] and tasks:
+            # partial args passed on to all tasks in the group (Issue #1057).
+            for task in tasks:
+                task['args'] = d['args'] + task['args']
+        return group(tasks, **kwdict(d['options']))
 
     def __call__(self, *partial_args, **options):
-        tasks, result, gid, args = self.type.prepare(options,
-                    [Signature.clone(t) for t in self.tasks], partial_args)
+        tasks, result, gid, args = self.type.prepare(
+            options, [Signature.clone(t) for t in self.tasks], partial_args,
+        )
         return self.type(tasks, result, gid, args)
 
-    def skew(self, start=1.0, stop=None, step=1.0):
-        _next_skew = fxrange(start, stop, step, repeatlast=True).next
+    def _freeze(self, _id=None):
+        opts = self.options
+        try:
+            gid = opts['group']
+        except KeyError:
+            gid = opts['group'] = uuid()
+        new_tasks, results = [], []
         for task in self.tasks:
-            task.set(countdown=_next_skew())
+            task = maybe_subtask(task).clone()
+            results.append(task._freeze())
+            new_tasks.append(task)
+        self.tasks = self.kwargs['tasks'] = new_tasks
+        return GroupResult(gid, results)
+
+    def skew(self, start=1.0, stop=None, step=1.0):
+        it = fxrange(start, stop, step, repeatlast=True)
+        for task in self.tasks:
+            task.set(countdown=next(it))
         return self
 
     def __iter__(self):
@@ -334,9 +408,12 @@ class chord(Signature):
     Chord = Chord
 
     def __init__(self, header, body=None, task='celery.chord',
-            args=(), kwargs={}, **options):
-        Signature.__init__(self, task, args, dict(kwargs,
-            header=_maybe_group(header), body=maybe_subtask(body)), **options)
+                 args=(), kwargs={}, **options):
+        Signature.__init__(
+            self, task, args,
+            dict(kwargs, header=_maybe_group(header),
+                 body=maybe_subtask(body)), **options
+        )
         self.subtask_type = 'chord'
 
     @classmethod
@@ -352,11 +429,12 @@ class chord(Signature):
 
     def __call__(self, body=None, **kwargs):
         _chord = self.Chord
-        body = self.kwargs['body'] = body or self.kwargs['body']
+        body = (body or self.kwargs['body']).clone()
+        kwargs = dict(self.kwargs, body=body, **kwargs)
         if _chord.app.conf.CELERY_ALWAYS_EAGER:
             return self.apply((), kwargs)
         callback_id = body.options.setdefault('task_id', uuid())
-        _chord(**dict(self.kwargs, **kwargs))
+        _chord(**kwargs)
         return _chord.AsyncResult(callback_id)
 
     def clone(self, *args, **kwargs):

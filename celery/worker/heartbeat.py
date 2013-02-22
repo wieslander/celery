@@ -9,7 +9,10 @@
 """
 from __future__ import absolute_import
 
-from .state import SOFTWARE_INFO
+from celery.five import values
+from celery.utils.sysinfo import load_average
+
+from .state import SOFTWARE_INFO, active_requests, total_count
 
 
 class Heart(object):
@@ -25,22 +28,26 @@ class Heart(object):
     def __init__(self, timer, eventer, interval=None):
         self.timer = timer
         self.eventer = eventer
-        self.interval = float(interval or 5.0)
+        self.interval = float(interval or 2.0)
         self.tref = None
 
-        # Make event dispatcher start/stop us when it's
-        # enabled/disabled.
+        # Make event dispatcher start/stop us when enabled/disabled.
         self.eventer.on_enabled.add(self.start)
         self.eventer.on_disabled.add(self.stop)
 
     def _send(self, event):
-        return self.eventer.send(event, freq=self.interval, **SOFTWARE_INFO)
+        return self.eventer.send(event, freq=self.interval,
+                                 active=len(active_requests),
+                                 processed=sum(values(total_count)),
+                                 loadavg=load_average(),
+                                 **SOFTWARE_INFO)
 
     def start(self):
         if self.eventer.enabled:
             self._send('worker-online')
-            self.tref = self.timer.apply_interval(self.interval * 1000.0,
-                    self._send, ('worker-heartbeat', ))
+            self.tref = self.timer.apply_interval(
+                self.interval * 1000.0, self._send, ('worker-heartbeat', ),
+            )
 
     def stop(self):
         if self.tref is not None:

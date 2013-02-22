@@ -28,11 +28,13 @@ from kombu.utils.encoding import safe_repr, safe_str
 
 from celery import current_app
 from celery import states, signals
-from celery._state import _task_stack, default_app
+from celery._state import _task_stack
+from celery.app import set_default_app
 from celery.app.task import Task as BaseTask, Context
 from celery.datastructures import ExceptionInfo
-from celery.exceptions import RetryTaskError
+from celery.exceptions import Ignore, RetryTaskError
 from celery.utils.log import get_logger
+from celery.utils.objects import mro_lookup
 from celery.utils.serialization import (
     get_pickleable_exception, get_pickled_exception
 )
@@ -52,48 +54,29 @@ LOG_INTERNAL_ERROR = 'Task %(name)s[%(id)s] INTERNAL ERROR: %(exc)s'
 #: Format string used to log task retry.
 LOG_RETRY = 'Task %(name)s[%(id)s] retry: %(exc)s'
 
-
 logger = get_logger(__name__)
 info = logger.info
 
 send_prerun = signals.task_prerun.send
-prerun_receivers = signals.task_prerun.receivers
 send_postrun = signals.task_postrun.send
-postrun_receivers = signals.task_postrun.receivers
 send_success = signals.task_success.send
-success_receivers = signals.task_success.receivers
 STARTED = states.STARTED
 SUCCESS = states.SUCCESS
+IGNORED = states.IGNORED
 RETRY = states.RETRY
 FAILURE = states.FAILURE
 EXCEPTION_STATES = states.EXCEPTION_STATES
 
-try:
-    _tasks = default_app._tasks
-except AttributeError:
-    # Windows: will be set later by concurrency.processes.
-    pass
-
-
-def mro_lookup(cls, attr, stop=()):
-    """Returns the first node by MRO order that defines an attribute.
-
-    :keyword stop: A list of types that if reached will stop the search.
-
-    :returns None: if the attribute was not found.
-
-    """
-    for node in cls.mro():
-        if node in stop:
-            return
-        if attr in node.__dict__:
-            return node
+#: set by :func:`setup_worker_optimizations`
+_tasks = None
+_patched = {}
 
 
 def task_has_custom(task, attr):
     """Returns true if the task or one of its bases
     defines ``attr`` (excluding the one in BaseTask)."""
-    return mro_lookup(task.__class__, attr, stop=(BaseTask, object))
+    return mro_lookup(task.__class__, attr, stop=(BaseTask, object),
+                      monkey_patched=['celery.app.task'])
 
 
 class TraceInfo(object):
@@ -120,15 +103,16 @@ class TraceInfo(object):
         req = task.request
         type_, _, tb = sys.exc_info()
         try:
-            pred = self.retval
-            einfo = ExceptionInfo((type_, pred, tb))
+            reason = self.retval
+            einfo = ExceptionInfo((type_, reason, tb))
             if store_errors:
-                task.backend.mark_as_retry(req.id, pred.exc, einfo.traceback)
-            task.on_retry(pred.exc, req.id, req.args, req.kwargs, einfo)
-            if _does_info:
-                info(LOG_RETRY, {
-                    'id': req.id, 'name': task.name,
-                    'exc': safe_repr(pred.exc)})
+                task.backend.mark_as_retry(req.id, reason.exc, einfo.traceback)
+            task.on_retry(reason.exc, req.id, req.args, req.kwargs, einfo)
+            signals.task_retry.send(sender=task, request=req,
+                                    reason=reason, einfo=einfo)
+            info(LOG_RETRY, {
+                'id': req.id, 'name': task.name,
+                'exc': safe_repr(reason.exc)})
             return einfo
         finally:
             del(tb)
@@ -146,7 +130,7 @@ class TraceInfo(object):
             signals.task_failure.send(sender=task, task_id=req.id,
                                       exception=exc, args=req.args,
                                       kwargs=req.kwargs,
-                                      traceback=einfo.traceback,
+                                      traceback=einfo.tb,
                                       einfo=einfo)
             self._log_error(task, einfo)
             return einfo
@@ -197,8 +181,8 @@ class TraceInfo(object):
 
 
 def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
-        Info=TraceInfo, eager=False, propagate=False, time=time,
-        truncate=truncate):
+                 Info=TraceInfo, eager=False, propagate=False,
+                 time=time, truncate=truncate):
     """Builts a function that tracing the tasks execution; catches all
     exceptions, and saves the state and result of the task execution
     to the result backend.
@@ -257,6 +241,10 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
     on_chord_part_return = backend.on_chord_part_return
     _does_info = logger.isEnabledFor(logging.INFO)
 
+    prerun_receivers = signals.task_prerun.receivers
+    postrun_receivers = signals.task_postrun.receivers
+    success_receivers = signals.task_success.receivers
+
     from celery import canvas
     subtask = canvas.subtask
 
@@ -283,6 +271,8 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                 try:
                     R = retval = fun(*args, **kwargs)
                     state = SUCCESS
+                except Ignore as exc:
+                    I, R = Info(IGNORED, exc), ExceptionInfo(internal=True)
                 except RetryTaskError as exc:
                     I = Info(RETRY, exc)
                     state, retval = I.state, I.retval
@@ -357,15 +347,24 @@ def trace_task(task, uuid, args, kwargs, request={}, **opts):
         return report_internal_error(task, exc)
 
 
-def trace_task_ret(task, uuid, args, kwargs, request={}):
-    R, I, T, Rstr = _tasks[task].__trace__(uuid, args, kwargs, request)
+def _trace_task_ret(name, uuid, args, kwargs, request={}, **opts):
+    R, I, T, Rstr = trace_task(current_app.tasks[name],
+                               uuid, args, kwargs, request, **opts)
     return R if I else Rstr, T
+trace_task_ret = _trace_task_ret
+
+
+def _fast_trace_task(task, uuid, args, kwargs, request={}):
+    # setup_worker_optimizations will point trace_task_ret to here,
+    # so this is the function used in the worker.
+    R, I, T, Rstr = _tasks[task].__trace__(uuid, args, kwargs, request)
+    return R if I else Rstr
 
 
 def eager_trace_task(task, uuid, args, kwargs, request=None, **opts):
     opts.setdefault('eager', True)
     return build_tracer(task.name, task, **opts)(
-            uuid, args, kwargs, request)
+        uuid, args, kwargs, request)
 
 
 def report_internal_error(task, exc):
@@ -379,3 +378,82 @@ def report_internal_error(task, exc):
         return exc_info
     finally:
         del(_tb)
+
+
+def setup_worker_optimizations(app):
+    global _tasks
+    global trace_task_ret
+
+    # make sure custom Task.__call__ methods that calls super
+    # will not mess up the request/task stack.
+    _install_stack_protection()
+
+    # all new threads start without a current app, so if an app is not
+    # passed on to the thread it will fall back to the "default app",
+    # which then could be the wrong app.  So for the worker
+    # we set this to always return our app.  This is a hack,
+    # and means that only a single app can be used for workers
+    # running in the same process.
+    app.set_current()
+    set_default_app(app)
+
+    # evaluate all task classes by finalizing the app.
+    app.finalize()
+
+    # set fast shortcut to task registry
+    _tasks = app._tasks
+
+    trace_task_ret = _fast_trace_task
+    try:
+        job = sys.modules['celery.worker.job']
+    except KeyError:
+        pass
+    else:
+        job.trace_task_ret = _fast_trace_task
+        job.__optimize__()
+
+
+def reset_worker_optimizations():
+    global trace_task_ret
+    trace_task_ret = _trace_task_ret
+    try:
+        delattr(BaseTask, '_stackprotected')
+    except AttributeError:
+        pass
+    try:
+        BaseTask.__call__ = _patched.pop('BaseTask.__call__')
+    except KeyError:
+        pass
+    try:
+        sys.modules['celery.worker.job'].trace_task_ret = _trace_task_ret
+    except KeyError:
+        pass
+
+
+def _install_stack_protection():
+    # Patches BaseTask.__call__ in the worker to handle the edge case
+    # where people override it and also call super.
+    #
+    # - The worker optimizes away BaseTask.__call__ and instead
+    #   calls task.run directly.
+    # - so with the addition of current_task and the request stack
+    #   BaseTask.__call__ now pushes to those stacks so that
+    #   they work when tasks are called directly.
+    #
+    # The worker only optimizes away __call__ in the case
+    # where it has not been overridden, so the request/task stack
+    # will blow if a custom task class defines __call__ and also
+    # calls super().
+    if not getattr(BaseTask, '_stackprotected', False):
+        _patched['BaseTask.__call__'] = orig = BaseTask.__call__
+
+        def __protected_call__(self, *args, **kwargs):
+            stack = self.request_stack
+            req = stack.top
+            if req and not req._protected and \
+                    len(stack) == 1 and not req.called_directly:
+                req._protected = 1
+                return self.run(*args, **kwargs)
+            return orig(self, *args, **kwargs)
+        BaseTask.__call__ = __protected_call__
+        BaseTask._stackprotected = True

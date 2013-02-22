@@ -7,11 +7,12 @@ from mock import Mock
 from nose import SkipTest
 
 from celery import current_app
+from celery.five import items, range
 from celery.result import AsyncResult, GroupResult
 from celery.utils import serialization
 from celery.utils.serialization import subclass_exception
 from celery.utils.serialization import \
-        find_nearest_pickleable_exception as fnpe
+    find_nearest_pickleable_exception as fnpe
 from celery.utils.serialization import UnpickleableExceptionWrapper
 from celery.utils.serialization import get_pickleable_exception as gpe
 
@@ -46,7 +47,7 @@ class test_serialization(Case):
     def test_create_exception_cls(self):
         self.assertTrue(serialization.create_exception_cls('FooError', 'm'))
         self.assertTrue(serialization.create_exception_cls('FooError', 'm',
-                                                            KeyError))
+                                                           KeyError))
 
 
 class test_BaseBackend_interface(Case):
@@ -66,7 +67,7 @@ class test_BaseBackend_interface(Case):
         p, current_app.tasks[unlock] = current_app.tasks.get(unlock), Mock()
         try:
             b.on_chord_apply('dakj221', 'sdokqweok',
-                             result=map(AsyncResult, [1, 2, 3]))
+                             result=[AsyncResult(x) for x in [1, 2, 3]])
             self.assertTrue(current_app.tasks[unlock].apply_async.call_count)
         finally:
             current_app.tasks[unlock] = p
@@ -229,14 +230,14 @@ class test_KeyValueStoreBackend(Case):
     def test_get_many(self):
         for is_dict in True, False:
             self.b.mget_returns_dict = is_dict
-            ids = dict((uuid(), i) for i in xrange(10))
-            for id, i in ids.items():
+            ids = dict((uuid(), i) for i in range(10))
+            for id, i in items(ids):
                 self.b.mark_as_done(id, i)
-            it = self.b.get_many(ids.keys())
+            it = self.b.get_many(list(ids))
             for i, (got_id, got_state) in enumerate(it):
                 self.assertEqual(got_state['result'], ids[got_id])
             self.assertEqual(i, 9)
-            self.assertTrue(list(self.b.get_many(ids.keys())))
+            self.assertTrue(list(self.b.get_many(list(ids))))
 
     def test_get_missing_meta(self):
         self.assertIsNone(self.b.get_result('xxx-missing'))

@@ -8,8 +8,10 @@
 """
 from __future__ import absolute_import
 
+from .five import string_t
+
 from billiard.exceptions import (  # noqa
-    SoftTimeLimitExceeded, TimeLimitExceeded, WorkerLostError,
+    SoftTimeLimitExceeded, TimeLimitExceeded, WorkerLostError, Terminated,
 )
 
 UNREGISTERED_FMT = """\
@@ -23,6 +25,10 @@ class SecurityError(Exception):
     Handle with care.
 
     """
+
+
+class Ignore(Exception):
+    """A task can raise this to ignore doing state updates."""
 
 
 class SystemTerminate(SystemExit):
@@ -59,10 +65,19 @@ class MaxRetriesExceededError(Exception):
 class RetryTaskError(Exception):
     """The task is to be retried later."""
 
+    #: Optional message describing context of retry.
+    message = None
+
+    #: Exception (if any) that caused the retry to happen.
+    exc = None
+
+    #: Time of retry (ETA), either int or :class:`~datetime.datetime`.
+    when = None
+
     def __init__(self, message=None, exc=None, when=None, **kwargs):
         from kombu.utils.encoding import safe_repr
         self.message = message
-        if isinstance(exc, basestring):
+        if isinstance(exc, string_t):
             self.exc, self.excs = None, exc
         else:
             self.exc, self.excs = exc, safe_repr(exc) if exc else None

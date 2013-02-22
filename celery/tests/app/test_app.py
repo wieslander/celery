@@ -11,6 +11,7 @@ from celery import Celery
 from celery import app as _app
 from celery import _state
 from celery.app import defaults
+from celery.five import items
 from celery.loaders.base import BaseLoader
 from celery.platforms import pyimplementation
 from celery.utils.serialization import pickle
@@ -27,14 +28,14 @@ THIS_IS_A_KEY = 'this is a value'
 class Object(object):
 
     def __init__(self, **kwargs):
-        for key, value in kwargs.items():
+        for key, value in items(kwargs):
             setattr(self, key, value)
 
 
 def _get_test_config():
     return dict((key, getattr(config, key))
-                    for key in dir(config)
-                        if key.isupper() and not key.startswith('_'))
+                for key in dir(config)
+                if key.isupper() and not key.startswith('_'))
 
 test_config = _get_test_config()
 
@@ -194,7 +195,7 @@ class test_App(Case):
 
         app = Celery(set_as_current=False)
         app.conf.CELERY_ANNOTATIONS = {
-                adX.name: {'@__call__': deco}
+            adX.name: {'@__call__': deco}
         }
         adX.bind(app)
         self.assertIs(adX.app, app)
@@ -267,19 +268,19 @@ class test_App(Case):
         self.assertDictContainsSubset(changes, restored.conf)
 
     def test_worker_main(self):
-        from celery.bin import celeryd
+        from celery.bin import worker as worker_bin
 
-        class WorkerCommand(celeryd.WorkerCommand):
+        class worker(worker_bin.worker):
 
             def execute_from_commandline(self, argv):
                 return argv
 
-        prev, celeryd.WorkerCommand = celeryd.WorkerCommand, WorkerCommand
+        prev, worker_bin.worker = worker_bin.worker, worker
         try:
             ret = self.app.worker_main(argv=['--version'])
             self.assertListEqual(ret, ['--version'])
         finally:
-            celeryd.WorkerCommand = prev
+            worker_bin.worker = prev
 
     def test_config_from_envvar(self):
         os.environ['CELERYTEST_CONFIG_OBJECT'] = 'celery.tests.app.test_app'
@@ -336,7 +337,7 @@ class test_App(Case):
 
     def test_Windows_log_color_disabled(self):
         self.app.IS_WINDOWS = True
-        self.assertFalse(self.app.log.supports_color())
+        self.assertFalse(self.app.log.supports_color(True))
 
     def test_compat_setting_CARROT_BACKEND(self):
         self.app.config_from_object(Object(CARROT_BACKEND='set_by_us'))
@@ -376,17 +377,20 @@ class test_App(Case):
         self.assertTrue(self.app.mail_admins('Subject', 'Body'))
 
     def test_amqp_get_broker_info(self):
-        self.assertDictContainsSubset({'hostname': 'localhost',
-                                       'userid': 'guest',
-                                       'password': 'guest',
-                                       'virtual_host': '/'},
-                            self.app.connection('amqplib://').info())
+        self.assertDictContainsSubset(
+            {'hostname': 'localhost',
+             'userid': 'guest',
+             'password': 'guest',
+             'virtual_host': '/'},
+            self.app.connection('pyamqp://').info(),
+        )
         self.app.conf.BROKER_PORT = 1978
         self.app.conf.BROKER_VHOST = 'foo'
-        self.assertDictContainsSubset({'port': 1978,
-                                       'virtual_host': 'foo'},
-                    self.app.connection('amqplib://:1978/foo').info())
-        conn = self.app.connection('amqplib:////value')
+        self.assertDictContainsSubset(
+            {'port': 1978, 'virtual_host': 'foo'},
+            self.app.connection('pyamqp://:1978/foo').info(),
+        )
+        conn = self.app.connection('pyamqp:////value')
         self.assertDictContainsSubset({'virtual_host': '/value'},
                                       conn.info())
 
@@ -438,8 +442,9 @@ class test_App(Case):
             chan.close()
         assert conn.transport_cls == 'memory'
 
-        prod = self.app.amqp.TaskProducer(conn,
-                exchange=Exchange('foo_exchange'))
+        prod = self.app.amqp.TaskProducer(
+            conn, exchange=Exchange('foo_exchange'),
+        )
 
         dispatcher = Dispatcher()
         self.assertTrue(prod.publish_task('footask', (), {},

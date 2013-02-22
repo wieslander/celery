@@ -67,24 +67,10 @@ CELERY_TIMEZONE
 
 Configure Celery to use a custom time zone.
 The timezone value can be any time zone supported by the :mod:`pytz`
-library.  :mod:`pytz` must be installed for the selected zone
-to be used.
+library.
 
-If not set then the systems default local time zone is used.
-
-.. warning::
-
-    Celery requires the :mod:`pytz` library to be installed,
-    when using custom time zones (other than UTC).  You can
-    install it using :program:`pip` or :program:`easy_install`:
-
-    .. code-block:: bash
-
-        $ pip install pytz
-
-    Pytz is a library that defines the timzones of the world,
-    it changes quite frequently so it is not included in the Python Standard
-    Library.
+If not set then the UTC timezone is used if :setting:`CELERY_ENABLE_UTC` is
+enabled, otherwise it falls back to the local timezone.
 
 .. _conf-tasks:
 
@@ -488,6 +474,13 @@ This is a dict supporting the following keys:
     The collection name to store task meta data.
     Defaults to "celery_taskmeta".
 
+* max_pool_size
+    Passed as max_pool_size to PyMongo's Connection or MongoClient 
+    constructor. It is the maximum number of TCP connections to keep
+    open to MongoDB at a given time. If there are more open connections
+    than max_pool_size, sockets will be closed when they are released.
+    Defaults to 10.
+
 .. _example-mongodb-result-config:
 
 Example configuration
@@ -570,6 +563,13 @@ use the ``TimeUUID`` type as a comparator::
 
     create column family task_results with comparator = TimeUUIDType;
 
+CASSANDRA_OPTIONS
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Options to be passed to the `pycassa connection pool`_ (optional).
+
+.. _`pycassa connection pool`: http://pycassa.github.com/pycassa/api/pycassa/pool.html
+
 Example configuration
 ~~~~~~~~~~~~~~~~~~~~~
 
@@ -581,6 +581,10 @@ Example configuration
     CASSANDRA_READ_CONSISTENCY = "ONE"
     CASSANDRA_WRITE_CONSISTENCY = "ONE"
     CASSANDRA_DETAILED_MODE = True
+    CASSANDRA_OPTIONS = {
+        'timeout': 300,
+        'max_retries': 10
+    }
 
 .. _conf-messaging:
 
@@ -610,6 +614,32 @@ CELERY_ROUTES
 A list of routers, or a single router used to route tasks to queues.
 When deciding the final destination of a task the routers are consulted
 in order.  See :ref:`routers` for more information.
+
+.. setting:: CELERY_QUEUE_HA_POLICY
+
+CELERY_QUEUE_HA_POLICY
+~~~~~~~~~~~~~~~~~~~~~~
+:brokers: RabbitMQ
+
+This will set the default HA policy for a queue, and the value
+can either be a string (usually ``all``):
+
+.. code-block:: python
+
+    CELERY_QUEUE_HA_POLICY = 'all'
+
+Using 'all' will replicate the queue to all current nodes,
+Or you can give it a list of nodes to replicate to:
+
+.. code-block:: python
+
+    CELERY_QUEUE_HA_POLICY = ['rabbit@host1', 'rabbit@host2']
+
+
+Using a list will implicitly set ``x-ha-policy`` to 'nodes' and
+``x-ha-policy-params`` to the given list of nodes.
+
+See http://www.rabbitmq.com/ha.html for more information.
 
 .. setting:: CELERY_WORKER_DIRECT
 
@@ -728,9 +758,10 @@ Only the scheme part (``transport://``) is required, the rest
 is optional, and defaults to the specific transports default values.
 
 The transport part is the broker implementation to use, and the
-default is ``amqp``, but there are many other choices including
-``librabbitmq``, ``amqplib``, ``redis``, ``beanstalk``,
-``sqlalchemy``, ``django``, ``mongodb``, ``couchdb`` and ``pika``.
+default is ``amqp``, which uses ``librabbitmq`` by default or falls back to
+``pyamqp`` if that is not installed.  Also there are many other choices including
+``redis``, ``beanstalk``, ``sqlalchemy``, ``django``, ``mongodb``,
+``couchdb``.
 It can also be a fully qualified path to your own transport implementation.
 
 See the Kombu documentation for more information about broker URLs.
@@ -754,8 +785,22 @@ and this requires the :mod:`amqp` module:
     $ pip install amqp
 
 The default heartbeat value is 10 seconds,
-the heartbeat will then be monitored at double the rate of the heartbeat value
+the heartbeat will then be monitored at the interval specified
+by the :setting:`BROKER_HEARTBEAT_CHECKRATE` setting, which by default is
+double the rate of the heartbeat value
 (so for the default 10 seconds, the heartbeat is checked every 5 seconds).
+
+.. setting:: BROKER_HEARTBEAT_CHECKRATE
+
+BROKER_HEARTBEAT_CHECKRATE
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+:transports supported: ``pyamqp``
+
+At intervals the worker will monitor that the broker has not missed
+too many heartbeats.  The rate at which this is checked is calculated
+by dividing the :setting:`BROKER_HEARTBEAT` value with this value,
+so if the heartbeat is 10.0 and the rate is the default 2.0, the check
+will be performed every 5 seconds (twice the heartbeat sending rate).
 
 .. setting:: BROKER_USE_SSL
 
@@ -829,6 +874,13 @@ A dict of additional options passed to the underlying transport.
 
 See your transport user manual for supported options (if any).
 
+Example setting the visibility timeout (supported by Redis and SQS
+transports):
+
+.. code-block:: python
+
+    BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': 18000}  # 5 hours
+
 .. _conf-task-execution:
 
 Task execution settings
@@ -890,12 +942,14 @@ stored task tombstones will be deleted.
 A built-in periodic task will delete the results after this time
 (:class:`celery.task.backend_cleanup`).
 
+Default is to expire after 1 day.
+
 .. note::
 
     For the moment this only works with the amqp, database, cache, redis and MongoDB
     backends.
 
-    When using the database or MongoDB backends, `celerybeat` must be
+    When using the database or MongoDB backends, `celery beat` must be
     running for the results to be expired.
 
 .. setting:: CELERY_MAX_CACHED_RESULTS
@@ -944,7 +998,7 @@ Decides if publishing task messages will be retried in the case
 of connection loss or other connection errors.
 See also :setting:`CELERY_TASK_PUBLISH_RETRY_POLICY`.
 
-Disabled by default.
+Enabled by default.
 
 .. setting:: CELERY_TASK_PUBLISH_RETRY_POLICY
 
@@ -987,17 +1041,17 @@ has been executed, not *just before*, which is the default behavior.
 
     FAQ: :ref:`faq-acks_late-vs-retry`.
 
-.. _conf-celeryd:
+.. _conf-worker:
 
-Worker: celeryd
----------------
+Worker
+------
 
 .. setting:: CELERY_IMPORTS
 
 CELERY_IMPORTS
 ~~~~~~~~~~~~~~
 
-A sequence of modules to import when the celery daemon starts.
+A sequence of modules to import when the worker starts.
 
 This is used to specify the task modules to import, but also
 to import signal handlers and additional remote control commands, etc.
@@ -1098,7 +1152,7 @@ Can be a relative or absolute path, but be aware that the suffix `.db`
 may be appended to the file name (depending on Python version).
 
 Can also be set via the :option:`--statedb` argument to
-:mod:`~celery.bin.celeryd`.
+:mod:`~celery.bin.worker`.
 
 Not enabled by default.
 
@@ -1245,7 +1299,7 @@ CELERY_SEND_TASK_SENT_EVENT
 
 .. versionadded:: 2.2
 
-If enabled, a `task-sent` event will be sent for every task so tasks can be
+If enabled, a :event:`task-sent` event will be sent for every task so tasks can be
 tracked before they are consumed by a worker.
 
 Disabled by default.
@@ -1343,7 +1397,7 @@ CELERYD_TASK_LOG_FORMAT
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 The format to use for log messages logged in tasks.  Can be overridden using
-the :option:`--loglevel` option to :mod:`~celery.bin.celeryd`.
+the :option:`--loglevel` option to :mod:`~celery.bin.worker`.
 
 Default is::
 
@@ -1362,7 +1416,7 @@ If enabled `stdout` and `stderr` will be redirected
 to the current logger.
 
 Enabled by default.
-Used by :program:`celeryd` and :program:`celerybeat`.
+Used by :program:`celery worker` and :program:`celery beat`.
 
 .. setting:: CELERY_REDIRECT_STDOUTS_LEVEL
 
@@ -1416,14 +1470,25 @@ The directory containing X.509 certificates used for
 Custom Component Classes (advanced)
 -----------------------------------
 
-.. setting:: CELERYD_BOOT_STEPS
+.. setting:: CELERYD_BOOTSTEPS
 
-CELERYD_BOOT_STEPS
-~~~~~~~~~~~~~~~~~~
+CELERYD_BOOTSTEPS
+~~~~~~~~~~~~~~~~~
 
 This setting enables you to add additional components to the worker process.
-It should be a list of module names with :class:`celery.abstract.Component`
+It should be a list of module names with
+:class:`celery.bootsteps.Step`
 classes, that augments functionality in the worker.
+
+.. setting:: CELERYD_CONSUMER_BOOTSTEPS
+
+CELERYD_CONSUMER_BOOTSTEPS
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This setting enables you to add additional components to the workers consumer.
+It should be a list of module names with
+:class:`celery.bootsteps.Step`` classes, that augments
+functionality in the consumer.
 
 .. setting:: CELERYD_POOL
 
@@ -1495,15 +1560,15 @@ by the pool implementation.
 
 .. _conf-celerybeat:
 
-Periodic Task Server: celerybeat
---------------------------------
+Periodic Task Server: celery beat
+---------------------------------
 
 .. setting:: CELERYBEAT_SCHEDULE
 
 CELERYBEAT_SCHEDULE
 ~~~~~~~~~~~~~~~~~~~
 
-The periodic task schedule used by :mod:`~celery.bin.celerybeat`.
+The periodic task schedule used by :mod:`~celery.bin.beat`.
 See :ref:`beat-entries`.
 
 .. setting:: CELERYBEAT_SCHEDULER
@@ -1515,7 +1580,7 @@ The default scheduler class.  Default is
 `"celery.beat.PersistentScheduler"`.
 
 Can also be set via the :option:`-S` argument to
-:mod:`~celery.bin.celerybeat`.
+:mod:`~celery.bin.beat`.
 
 .. setting:: CELERYBEAT_SCHEDULE_FILENAME
 
@@ -1527,24 +1592,24 @@ of periodic tasks.  Can be a relative or absolute path, but be aware that the
 suffix `.db` may be appended to the file name (depending on Python version).
 
 Can also be set via the :option:`--schedule` argument to
-:mod:`~celery.bin.celerybeat`.
+:mod:`~celery.bin.beat`.
 
 .. setting:: CELERYBEAT_MAX_LOOP_INTERVAL
 
 CELERYBEAT_MAX_LOOP_INTERVAL
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The maximum number of seconds :mod:`~celery.bin.celerybeat` can sleep
+The maximum number of seconds :mod:`~celery.bin.beat` can sleep
 between checking the schedule.
 
 
 The default for this value is scheduler specific.
-For the default celerybeat scheduler the value is 300 (5 minutes),
+For the default celery beat scheduler the value is 300 (5 minutes),
 but for e.g. the django-celery database scheduler it is 5 seconds
 because the schedule may be changed externally, and so it must take
 changes to the schedule into account.
 
-Also when running celerybeat embedded (:option:`-B`) on Jython as a thread
+Also when running celery beat embedded (:option:`-B`) on Jython as a thread
 the max interval is overridden and set to 1 so that it's possible
 to shut down in a timely manner.
 

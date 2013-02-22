@@ -12,14 +12,17 @@
 from __future__ import absolute_import
 
 import os
+import sys
 import platform
 import shelve
 
 from collections import defaultdict
 
+from kombu.utils import cached_property
+
 from celery import __version__
+from celery.exceptions import SystemTerminate
 from celery.datastructures import LimitedSet
-from celery.utils import cached_property
 
 #: Worker software/platform information.
 SOFTWARE_INFO = {'sw_ident': 'py-celery',
@@ -39,8 +42,8 @@ reserved_requests = set()
 #: set of currently active :class:`~celery.worker.job.Request`'s.
 active_requests = set()
 
-#: count of tasks executed by the worker, sorted by type.
-total_count = defaultdict(lambda: 0)
+#: count of tasks accepted by the worker, sorted by type.
+total_count = defaultdict(int)
 
 #: the list of currently revoked tasks.  Persistent if statedb set.
 revoked = LimitedSet(maxlen=REVOKES_MAX, expires=REVOKE_EXPIRES)
@@ -50,6 +53,13 @@ task_reserved = reserved_requests.add
 
 should_stop = False
 should_terminate = False
+
+
+def maybe_shutdown():
+    if should_stop:
+        raise SystemExit()
+    elif should_terminate:
+        raise SystemTerminate()
 
 
 def task_accepted(request):
@@ -88,9 +98,9 @@ if C_BENCH:  # pragma: no cover
         def on_shutdown():
             if bench_first is not None and bench_last is not None:
                 print('- Time spent in benchmark: {0!r}'.format(
-                        bench_last - bench_first))
+                      bench_last - bench_first))
                 print('- Avg: {0}'.format(
-                        sum(bench_sample) / len(bench_sample)))
+                      sum(bench_sample) / len(bench_sample)))
                 memdump()
 
     def task_reserved(request):  # noqa
@@ -104,7 +114,6 @@ if C_BENCH:  # pragma: no cover
 
         return __reserved(request)
 
-    import sys
     def task_ready(request):  # noqa
         global all_count
         global bench_start
@@ -114,7 +123,7 @@ if C_BENCH:  # pragma: no cover
             now = time()
             diff = now - bench_start
             print('- Time spent processing %s tasks (since first '
-                    'task received): ~{0:.4f}s\n'.format(bench_every, diff))
+                  'task received): ~{0:.4f}s\n'.format(bench_every, diff))
             sys.stdout.flush()
             bench_start = bench_last = now
             bench_sample.append(diff)
@@ -132,8 +141,9 @@ class Persistent(object):
     storage = shelve
     _is_open = False
 
-    def __init__(self, filename):
+    def __init__(self, filename, clock=None):
         self.filename = filename
+        self.clock = clock
         self._load()
 
     def save(self):
@@ -143,12 +153,16 @@ class Persistent(object):
 
     def merge(self, d):
         revoked.update(d.get('revoked') or {})
+        if self.clock:
+            d['clock'] = self.clock.adjust(d.get('clock') or 0)
         return d
 
     def sync(self, d):
         prev = d.get('revoked') or {}
         prev.update(revoked.as_dict())
         d['revoked'] = prev
+        if self.clock:
+            d['clock'] = self.clock.forward()
         return d
 
     def open(self):

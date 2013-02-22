@@ -9,12 +9,22 @@
 from __future__ import absolute_import
 
 import smtplib
+import socket
 import traceback
 import warnings
 
 from email.mime.text import MIMEText
 
 from .functional import maybe_list
+
+_local_hostname = None
+
+
+def get_local_hostname():
+    global _local_hostname
+    if _local_hostname is None:
+        _local_hostname = socket.getfqdn()
+    return _local_hostname
 
 
 class SendmailWarning(UserWarning):
@@ -23,8 +33,8 @@ class SendmailWarning(UserWarning):
 
 class Message(object):
 
-    def __init__(self, to=None, sender=None, subject=None, body=None,
-            charset='us-ascii'):
+    def __init__(self, to=None, sender=None, subject=None,
+                 body=None, charset='us-ascii'):
         self.to = maybe_list(to)
         self.sender = sender
         self.subject = subject
@@ -45,7 +55,7 @@ class Message(object):
 class Mailer(object):
 
     def __init__(self, host='localhost', port=0, user=None, password=None,
-            timeout=2, use_ssl=False, use_tls=False):
+                 timeout=2, use_ssl=False, use_tls=False):
         self.host = host
         self.port = port
         self.user = user
@@ -68,7 +78,8 @@ class Mailer(object):
 
     def _send(self, message, **kwargs):
         Client = smtplib.SMTP_SSL if self.use_ssl else smtplib.SMTP
-        client = Client(self.host, self.port, timeout=self.timeout, **kwargs)
+        client = Client(self.host, self.port, timeout=self.timeout,
+                        local_hostname=get_local_hostname(), **kwargs)
 
         if self.use_tls:
             client.ehlo()
@@ -79,7 +90,10 @@ class Mailer(object):
             client.login(self.user, self.password)
 
         client.sendmail(message.sender, message.to, str(message))
-        client.quit()
+        try:
+            client.quit()
+        except socket.sslerror:
+            client.close()
 
 
 class ErrorMail(object):
@@ -116,7 +130,7 @@ class ErrorMail(object):
 
     * hostname
 
-        Worker hostname.
+        Worker nodename.
 
     """
 
@@ -126,7 +140,7 @@ class ErrorMail(object):
 
     #: Format string used to generate error email subjects.
     subject = """\
-        [celery@{hostname}] Error: Task {name} ({id}): {exc!r}
+        [{hostname}] Error: Task {name} ({id}): {exc!r}
     """
 
     #: Format string used to generate error email content.
@@ -147,8 +161,8 @@ py-celery at {{hostname}}.
 
     def __init__(self, task, **kwargs):
         self.task = task
-        self.email_subject = kwargs.get('subject', self.subject)
-        self.email_body = kwargs.get('body', self.body)
+        self.subject = kwargs.get('subject', self.subject)
+        self.body = kwargs.get('body', self.body)
 
     def should_send(self, context, exc):
         """Returns true or false depending on if a task error mail

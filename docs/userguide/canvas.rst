@@ -16,7 +16,7 @@ Subtasks
 .. versionadded:: 2.0
 
 You just learned how to call a task using the tasks ``delay`` method
-in the :ref:`calling <calling>` guide, and this is often all you need,
+in the :ref:`calling <guide-calling>` guide, and this is often all you need,
 but sometimes you may want to pass the signature of a task invocation to
 another process or as an argument to another function, for this Celery uses
 something called *subtasks*.
@@ -31,8 +31,8 @@ or even serialized and sent across the wire.
         >>> subtask('tasks.add', args=(2, 2), countdown=10)
         tasks.add(2, 2)
 
-    This subtask has a signature of arity 2 (two arguments): ``(2, 2)``,
-    and sets the countdown execution option to 10.
+  This subtask has a signature of arity 2 (two arguments): ``(2, 2)``,
+  and sets the countdown execution option to 10.
 
 - or you can create one using the task's ``subtask`` method::
 
@@ -466,7 +466,7 @@ the error callbacks take the id of the parent task as argument instead:
     def log_error(task_id):
         result = celery.AsyncResult(task_id)
         result.get(propagate=False)  # make sure result written.
-        with open(os.path.join('/var/errors', task_id)) as fh:
+        with open(os.path.join('/var/errors', task_id), 'a') as fh:
             print('--\n\n{0} {1} {2}'.format(
                 task_id, result.result, result.traceback), file=fh)
 
@@ -545,7 +545,7 @@ and create images:
 
     $ dot -Tpng graph.dot -o graph.png
 
-.. image:: ../images/graph.png
+.. image:: ../images/result_graph.png
 
 .. _canvas-group:
 
@@ -728,6 +728,30 @@ for other tasks <task-synchronous-subtasks>`)
 
 Important Notes
 ~~~~~~~~~~~~~~~
+
+Tasks used within a chord must *not* ignore their results. In practice this
+means that you must enable a :const:`CELERY_RESULT_BACKEND` in order to use
+chords. Additionally, if :const:`CELERY_IGNORE_RESULT` is set to :const:`True`
+in your configuration, be sure that the individual tasks to be used within
+the chord are defined with :const:`ignore_result=False`. This applies to both
+Task subclasses and decorated tasks.
+
+Example Task subclass:
+
+.. code-block:: python
+
+    class MyTask(Task):
+        abstract = True
+        ignore_result = False
+
+
+Example decorated task:
+
+.. code-block:: python
+
+    @celery.task(ignore_result=False)
+    def another_task(project):
+        do_something()
 
 By default the synchronization step is implemented by having a recurring task
 poll the completion of the taskset every second, calling the subtask when

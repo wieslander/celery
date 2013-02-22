@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# -* coding: utf-8 -*-
 """
     celery.backends.cassandra
     ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -47,7 +47,7 @@ class CassandraBackend(BaseBackend):
     _retry_wait = 3
 
     def __init__(self, servers=None, keyspace=None, column_family=None,
-            cassandra_options=None, detailed_mode=False, **kwargs):
+                 cassandra_options=None, detailed_mode=False, **kwargs):
         """Initialize Cassandra backend.
 
         Raises :class:`celery.exceptions.ImproperlyConfigured` if
@@ -57,7 +57,7 @@ class CassandraBackend(BaseBackend):
         super(CassandraBackend, self).__init__(**kwargs)
 
         self.expires = kwargs.get('expires') or maybe_timedelta(
-                                    self.app.conf.CELERY_TASK_RESULT_EXPIRES)
+            self.app.conf.CELERY_TASK_RESULT_EXPIRES)
 
         if not pycassa:
             raise ImproperlyConfigured(
@@ -94,7 +94,7 @@ class CassandraBackend(BaseBackend):
 
         if not self.servers or not self.keyspace or not self.column_family:
             raise ImproperlyConfigured(
-                    'Cassandra backend not configured.')
+                'Cassandra backend not configured.')
 
         self._column_family = None
 
@@ -108,7 +108,7 @@ class CassandraBackend(BaseBackend):
                     pycassa.UnavailableException,
                     socket.error,
                     socket.timeout,
-                    Thrift.TException), exc:
+                    Thrift.TException) as exc:
                 if time.time() > ts:
                     raise
                 logger.warn('Cassandra error: %r. Retrying...', exc)
@@ -119,10 +119,11 @@ class CassandraBackend(BaseBackend):
             conn = pycassa.ConnectionPool(self.keyspace,
                                           server_list=self.servers,
                                           **self.cassandra_options)
-            self._column_family = \
-              pycassa.ColumnFamily(conn, self.column_family,
-                    read_consistency_level=self.read_consistency,
-                    write_consistency_level=self.write_consistency)
+            self._column_family = pycassa.ColumnFamily(
+                conn, self.column_family,
+                read_consistency_level=self.read_consistency,
+                write_consistency_level=self.write_consistency,
+            )
         return self._column_family
 
     def process_cleanup(self):
@@ -142,11 +143,11 @@ class CassandraBackend(BaseBackend):
             if self.detailed_mode:
                 meta['result'] = result
                 cf.insert(task_id, {date_done: self.encode(meta)},
-                          ttl=timedelta_seconds(self.expires))
+                          ttl=self.expires and timedelta_seconds(self.expires))
             else:
                 meta['result'] = self.encode(result)
                 cf.insert(task_id, meta,
-                          ttl=timedelta_seconds(self.expires))
+                          ttl=self.expires and timedelta_seconds(self.expires))
 
         return self._retry_on_error(_do_store)
 
@@ -158,7 +159,7 @@ class CassandraBackend(BaseBackend):
             try:
                 if self.detailed_mode:
                     row = cf.get(task_id, column_reversed=True, column_count=1)
-                    meta = self.decode(row.values()[0])
+                    meta = self.decode(list(row.values())[0])
                     meta['task_id'] = task_id
                 else:
                     obj = cf.get(task_id)

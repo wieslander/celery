@@ -16,8 +16,9 @@ from itertools import islice
 
 from kombu.utils import cached_property
 from kombu.utils.functional import promise, maybe_promise
+from kombu.utils.compat import OrderedDict
 
-from .compat import UserDict, UserList, OrderedDict
+from celery.five import UserDict, UserList, items, keys, string_t
 
 KEYWORD_MARK = object()
 is_not_None = partial(operator.is_not, None)
@@ -45,7 +46,7 @@ class LRUCache(UserDict):
 
     def keys(self):
         # userdict.keys in py3k calls __getitem__
-        return self.data.keys()
+        return keys(self.data)
 
     def values(self):
         return list(self._iterate_values())
@@ -90,7 +91,7 @@ class LRUCache(UserDict):
 
 def is_list(l):
     """Returns true if object is list-like, but not a dict or string."""
-    return hasattr(l, '__iter__') and not isinstance(l, (dict, basestring))
+    return hasattr(l, '__iter__') and not isinstance(l, (dict, string_t))
 
 
 def maybe_list(l):
@@ -106,7 +107,7 @@ def memoize(maxsize=None, Cache=LRUCache):
 
         @wraps(fun)
         def _M(*args, **kwargs):
-            key = args + (KEYWORD_MARK, ) + tuple(sorted(kwargs.iteritems()))
+            key = args + (KEYWORD_MARK, ) + tuple(sorted(kwargs.items()))
             try:
                 with mutex:
                     value = cache[key]
@@ -234,7 +235,7 @@ def mattrgetter(*attrs):
     """Like :func:`operator.itemgetter` but returns :const:`None` on missing
     attributes instead of raising :exc:`AttributeError`."""
     return lambda obj: dict((attr, getattr(obj, attr, None))
-                                for attr in attrs)
+                            for attr in attrs)
 
 
 def uniq(it):
@@ -260,3 +261,8 @@ class _regen(UserList, list):
     @cached_property
     def data(self):
         return list(self.__it)
+
+
+def dictfilter(d, **filterkeys):
+    d = dict(d, **filterkeys) if filterkeys else d
+    return dict((k, v) for k, v in items(d) if v is not None)

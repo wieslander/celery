@@ -6,7 +6,7 @@
     The task implementation has been moved to :mod:`celery.app.task`.
 
     This contains the backward compatible Task class used in the old API,
-    and shouldn't be used anymore.
+    and shouldn't be used in new applications.
 
 """
 from __future__ import absolute_import
@@ -14,14 +14,15 @@ from __future__ import absolute_import
 from kombu import Exchange
 
 from celery import current_app
-from celery.__compat__ import class_property, reclassmethod
 from celery.app.task import Context, TaskType, Task as BaseTask  # noqa
+from celery.five import class_property, reclassmethod
 from celery.schedules import maybe_schedule
 from celery.utils.log import get_task_logger
 
 #: list of methods that must be classmethods in the old API.
 _COMPAT_CLASSMETHODS = (
-    'delay', 'apply_async', 'retry', 'apply', 'AsyncResult', 'subtask',
+    'delay', 'apply_async', 'retry', 'apply', 'subtask_from_request',
+    'AsyncResult', 'subtask', '_get_request',
 )
 
 
@@ -33,6 +34,7 @@ class Task(BaseTask):
     """
     abstract = True
     __bound__ = False
+    __v2_compat__ = True
 
     #- Deprecated compat. attributes -:
 
@@ -41,8 +43,8 @@ class Task(BaseTask):
     exchange = None
     exchange_type = None
     delivery_mode = None
-    mandatory = False
-    immediate = False
+    mandatory = False  # XXX deprecated
+    immediate = False  # XXX deprecated
     priority = None
     type = 'regular'
     disable_error_emails = False
@@ -61,10 +63,10 @@ class Task(BaseTask):
     for name in _COMPAT_CLASSMETHODS:
         locals()[name] = reclassmethod(getattr(BaseTask, name))
 
+    @class_property
     @classmethod
-    def _get_request(self):
-        return self.request_stack.top
-    request = class_property(_get_request)
+    def request(cls):
+        return cls._get_request()
 
     @classmethod
     def get_logger(self, **kwargs):
@@ -90,7 +92,7 @@ class Task(BaseTask):
         return self._get_app().connection()
 
     def get_publisher(self, connection=None, exchange=None,
-            exchange_type=None, **options):
+                      exchange_type=None, **options):
         """Deprecated method to get the task publisher (now called producer).
 
         Should be replaced with :class:`@amqp.TaskProducer`:
@@ -106,9 +108,11 @@ class Task(BaseTask):
         if exchange_type is None:
             exchange_type = self.exchange_type
         connection = connection or self.establish_connection()
-        return self._get_app().amqp.TaskProducer(connection,
-                exchange=exchange and Exchange(exchange, exchange_type),
-                routing_key=self.routing_key, **options)
+        return self._get_app().amqp.TaskProducer(
+            connection,
+            exchange=exchange and Exchange(exchange, exchange_type),
+            routing_key=self.routing_key, **options
+        )
 
     @classmethod
     def get_consumer(self, connection=None, queues=None, **kwargs):
@@ -137,19 +141,19 @@ class PeriodicTask(Task):
     def __init__(self):
         if not hasattr(self, 'run_every'):
             raise NotImplementedError(
-                    'Periodic tasks must have a run_every attribute')
+                'Periodic tasks must have a run_every attribute')
         self.run_every = maybe_schedule(self.run_every, self.relative)
         super(PeriodicTask, self).__init__()
 
     @classmethod
     def on_bound(cls, app):
         app.conf.CELERYBEAT_SCHEDULE[cls.name] = {
-                'task': cls.name,
-                'schedule': cls.run_every,
-                'args': (),
-                'kwargs': {},
-                'options': cls.options or {},
-                'relative': cls.relative,
+            'task': cls.name,
+            'schedule': cls.run_every,
+            'args': (),
+            'kwargs': {},
+            'options': cls.options or {},
+            'relative': cls.relative,
         }
 
 

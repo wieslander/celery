@@ -8,6 +8,7 @@ from nose import SkipTest
 
 from celery import beat
 from celery import task
+from celery.five import keys, string_t
 from celery.result import AsyncResult
 from celery.schedules import schedule
 from celery.task.base import Task
@@ -131,6 +132,7 @@ class mocked_schedule(schedule):
         self._is_due = is_due
         self._next_run_at = next_run_at
         self.run_every = timedelta(seconds=1)
+        self.nowfun = datetime.utcnow
 
     def is_due(self, last_run_at):
         return self._is_due, self._next_run_at
@@ -189,7 +191,7 @@ class test_Scheduler(Case):
 
     def test_info(self):
         scheduler = mScheduler()
-        self.assertIsInstance(scheduler.info, basestring)
+        self.assertIsInstance(scheduler.info, string_t)
 
     def test_maybe_entry(self):
         s = mScheduler()
@@ -265,7 +267,7 @@ class test_Scheduler(Case):
         nums = [600, 300, 650, 120, 250, 36]
         s = dict(('test_ticks%s' % i,
                  {'schedule': mocked_schedule(False, j)})
-                    for i, j in enumerate(nums))
+                 for i, j in enumerate(nums))
         scheduler.update_from_dict(s)
         self.assertEqual(scheduler.tick(), min(nums))
 
@@ -368,8 +370,8 @@ class test_Service(Case):
         schedule = s.scheduler.schedule
         self.assertIsInstance(schedule, dict)
         self.assertIsInstance(s.scheduler, beat.Scheduler)
-        scheduled = schedule.keys()
-        for task_name in sh['entries'].keys():
+        scheduled = list(schedule.keys())
+        for task_name in keys(sh['entries']):
             self.assertIn(task_name, scheduled)
 
         s.sync()

@@ -41,7 +41,7 @@ class test_EventDispatcher(AppCase):
 
     def test_send(self):
         producer = MockProducer()
-        eventer = self.app.events.Dispatcher(object(), enabled=False)
+        eventer = self.app.events.Dispatcher(Mock(), enabled=False)
         eventer.publisher = producer
         eventer.enabled = True
         eventer.send('World War II', ended=True)
@@ -96,11 +96,11 @@ class test_EventDispatcher(AppCase):
                                                     enabled=True)
             dispatcher2 = self.app.events.Dispatcher(connection,
                                                      enabled=True,
-                                                      channel=channel)
+                                                     channel=channel)
             self.assertTrue(dispatcher.enabled)
             self.assertTrue(dispatcher.publisher.channel)
             self.assertEqual(dispatcher.publisher.serializer,
-                            self.app.conf.CELERY_EVENT_SERIALIZER)
+                             self.app.conf.CELERY_EVENT_SERIALIZER)
 
             created_channel = dispatcher.publisher.channel
             dispatcher.disable()
@@ -151,12 +151,9 @@ class test_EventReceiver(AppCase):
         connection = Mock()
         connection.transport_cls = 'memory'
         r = events.EventReceiver(connection, node_id='celery.tests')
-        events.EventReceiver.handlers['*'] = my_handler
-        try:
-            r._receive(message, object())
-            self.assertTrue(got_event[0])
-        finally:
-            events.EventReceiver.handlers = {}
+        r.handlers['*'] = my_handler
+        r._receive(message, object())
+        self.assertTrue(got_event[0])
 
     def test_itercapture(self):
         connection = self.app.connection()

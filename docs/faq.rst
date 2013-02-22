@@ -98,17 +98,16 @@ Billiard is a fork of the Python multiprocessing module containing
 many performance and stability improvements.  It is an eventual goal
 that these improvements will be merged back into Python one day.
 
-It is also used for compatibility with older Python versions.
+It is also used for compatibility with older Python versions
+that doesn't come with the multiprocessing module.
 
 .. _`billiard`: http://pypi.python.org/pypi/billiard
 
-- `python-dateutil`_
+- `pytz`
 
-The dateutil module is used by Celery to parse ISO-8601 formatted time strings,
-as well as its ``relativedelta`` class which is used in the implementation
-of crontab style periodic tasks.
+The pytz module provides timezone definitions and related tools.
 
-.. _`python-dateutil`: http://pypi.python.org/pypi/python-dateutil
+.. _`pytz`: http://pypi.python.org/pypi/pytz
 
 django-celery
 ~~~~~~~~~~~~~
@@ -123,12 +122,12 @@ kombu
 
 Kombu depends on the following packages:
 
-- `amqplib`_
+- `amqp`_
 
 The underlying pure-Python amqp client implementation.  AMQP being the default
-broker it is a natural dependency.
+broker this is a natural dependency.
 
-.. _`amqplib`: http://pypi.python.org/pypi/amqplib
+.. _`amqp`: http://pypi.python.org/pypi/amqp
 
 - `anyjson`_
 
@@ -224,7 +223,7 @@ Is Celery multilingual?
 
 **Answer:** Yes.
 
-:mod:`~celery.bin.celeryd` is an implementation of Celery in Python. If the
+:mod:`~celery.bin.worker` is an implementation of Celery in Python. If the
 language has an AMQP client, there shouldn't be much work to create a worker
 in your language.  A Celery worker is just a program connecting to the broker
 to process messages.
@@ -232,10 +231,7 @@ to process messages.
 Also, there's another way to be language independent, and that is to use REST
 tasks, instead of your tasks being functions, they're URLs. With this
 information you can even create simple web servers that enable preloading of
-code. See: `User Guide: Remote Tasks`_.
-
-.. _`User Guide: Remote Tasks`:
-    http://celery.github.com/celery/userguide/remote-tasks.html
+code. See: :ref:`User Guide: Remote Tasks <guide-webhooks>`.
 
 .. _faq-troubleshooting:
 
@@ -263,8 +259,8 @@ Transaction Model and Locking`_ in the MySQL user manual.
 
 .. _faq-worker-hanging:
 
-celeryd is not doing anything, just hanging
---------------------------------------------
+The worker is not doing anything, just hanging
+----------------------------------------------
 
 **Answer:** See `MySQL is throwing deadlock errors, what can I do?`_.
             or `Why is Task.delay/apply\* just hanging?`.
@@ -279,8 +275,8 @@ using MySQL, see `MySQL is throwing deadlock errors, what can I do?`_.
 
 .. _faq-publish-hanging:
 
-Why is Task.delay/apply\*/celeryd just hanging?
------------------------------------------------
+Why is Task.delay/apply\*/the worker just hanging?
+--------------------------------------------------
 
 **Answer:** There is a bug in some AMQP clients that will make it hang if
 it's not able to authenticate the current user, the password doesn't match or
@@ -288,7 +284,7 @@ the user does not have access to the virtual host specified. Be sure to check
 your broker logs (for RabbitMQ that is :file:`/var/log/rabbitmq/rabbit.log` on
 most systems), it usually contains a message describing the reason.
 
-.. _faq-celeryd-on-freebsd:
+.. _faq-worker-on-freebsd:
 
 Does it work on FreeBSD?
 ------------------------
@@ -327,7 +323,7 @@ This shows that there's 2891 messages waiting to be processed in the task
 queue, and there are two consumers processing them.
 
 One reason that the queue is never emptied could be that you have a stale
-worker process taking the messages hostage. This could happen if celeryd
+worker process taking the messages hostage. This could happen if the worker
 wasn't properly shut down.
 
 When a message is received by a worker the broker waits for it to be
@@ -359,7 +355,7 @@ task manually:
     >>> from myapp.tasks import MyPeriodicTask
     >>> MyPeriodicTask.delay()
 
-Watch celeryd`s log file to see if it's able to find the task, or if some
+Watch the workers log file to see if it's able to find the task, or if some
 other error is happening.
 
 .. _faq-periodic-task-does-not-run:
@@ -398,7 +394,7 @@ you have to use the AMQP API or the :program:`celery amqp` utility:
 
 The number 1753 is the number of messages deleted.
 
-You can also start :mod:`~celery.bin.celeryd` with the
+You can also start :mod:`~celery.bin.worker` with the
 :option:`--purge` argument, to purge messages when the worker starts.
 
 .. _faq-messages-left-after-purge:
@@ -474,14 +470,14 @@ You can enable this using the :setting:`BROKER_USE_SSL` setting.
 It is also possible to add additional encryption and security to messages,
 if you have a need for this then you should contact the :ref:`mailing-list`.
 
-Is it safe to run :program:`celeryd` as root?
----------------------------------------------
+Is it safe to run :program:`celery worker` as root?
+---------------------------------------------------
 
 **Answer**: No!
 
 We're not currently aware of any security issues, but it would
 be incredibly naive to assume that they don't exist, so running
-the Celery services (:program:`celeryd`, :program:`celerybeat`,
+the Celery services (:program:`celery worker`, :program:`celery beat`,
 :program:`celeryev`, etc) as an unprivileged user is recommended.
 
 .. _faq-brokers:
@@ -512,7 +508,7 @@ important that you are aware of the common pitfalls.
 
 * Events.
 
-Running :mod:`~celery.bin.celeryd` with the :option:`-E`/:option:`--events`
+Running :mod:`~celery.bin.worker` with the :option:`-E`/:option:`--events`
 option will send messages for events happening inside of the worker.
 
 Events should only be enabled if you have an active monitor consuming them,
@@ -587,7 +583,7 @@ without a tty to run sudo::
     Defaults requiretty
 
 If you have this configuration in your :file:`/etc/sudoers` file then
-tasks will not be able to call sudo when celeryd is running as a daemon.
+tasks will not be able to call sudo when the worker is running as a daemon.
 If you want to enable that, then you need to remove the line from sudoers.
 
 See: http://timelordz.com/wiki/Apache_Sudo_Commands
@@ -711,15 +707,15 @@ uses its host name to create a unique queue name to listen to,
 so if you have more than one worker with the same host name, the
 control commands will be received in round-robin between them.
 
-To work around this you can explicitly set the host name for every worker
-using the :option:`--hostname` argument to :mod:`~celery.bin.celeryd`:
+To work around this you can explicitly set the nodename for every worker
+using the :option:`-n` argument to :mod:`~celery.bin.worker`:
 
 .. code-block:: bash
 
-    $ celeryd --hostname=$(hostname).1
-    $ celeryd --hostname=$(hostname).2
+    $ celery worker -n worker1@%h
+    $ celery worker -n worker2@%h
 
-etc., etc...
+where ``%h`` is automatically expanded into the current hostname.
 
 .. _faq-task-routing:
 
@@ -833,13 +829,13 @@ Or to schedule a periodic task at a specific time, use the
 
 .. _faq-safe-worker-shutdown:
 
-How do I shut down `celeryd` safely?
+How can I safely shut down the worker?
 --------------------------------------
 
 **Answer**: Use the :sig:`TERM` signal, and the worker will finish all currently
 executing jobs and shut down as soon as possible. No tasks should be lost.
 
-You should never stop :mod:`~celery.bin.celeryd` with the :sig:`KILL` signal
+You should never stop :mod:`~celery.bin.worker` with the :sig:`KILL` signal
 (:option:`-9`), unless you've tried :sig:`TERM` a few times and waited a few
 minutes to let it get a chance to shut down.  As if you do tasks may be
 terminated mid-execution, and they will not be re-run unless you have the
@@ -851,8 +847,8 @@ terminated mid-execution, and they will not be re-run unless you have the
 
 .. _faq-daemonizing:
 
-How do I run celeryd in the background on [platform]?
------------------------------------------------------
+How do I run the worker in the background on [platform]?
+--------------------------------------------------------
 **Answer**: Please see :ref:`daemonizing`.
 
 .. _faq-django:
@@ -892,39 +888,9 @@ Several database tables are created by default, these relate to
 Windows
 =======
 
-.. _faq-windows-worker-spawn-loop:
-
-celeryd keeps spawning processes at startup
--------------------------------------------
-
-**Answer**: This is a known issue on Windows.
-You have to start celeryd with the command:
-
-.. code-block:: bash
-
-    $ python -m celery.bin.celeryd
-
-Any additional arguments can be appended to this command.
-
-See http://bit.ly/bo9RSw
-
 .. _faq-windows-worker-embedded-beat:
 
-The `-B` / `--beat` option to celeryd doesn't work?
+The `-B` / `--beat` option to worker doesn't work?
 ----------------------------------------------------------------
-**Answer**: That's right. Run `celerybeat` and `celeryd` as separate
+**Answer**: That's right. Run `celery beat` and `celery worker` as separate
 services instead.
-
-.. _faq-windows-django-settings:
-
-`django-celery` can't find settings?
---------------------------------------
-
-**Answer**: You need to specify the :option:`--settings` argument to
-:program:`manage.py`:
-
-.. code-block:: bash
-
-    $ python manage.py celeryd start --settings=settings
-
-See http://bit.ly/bo9RSw

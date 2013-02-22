@@ -9,15 +9,17 @@
 from __future__ import absolute_import, print_function
 
 import os
+import socket
 import sys
 import threading
 import traceback
 
-from kombu.syn import detect_environment
+from contextlib import contextmanager
 
 from celery.local import Proxy
+from celery.five import THREAD_TIMEOUT_MAX, items
 
-USE_PURE_LOCALS = os.environ.get('USE_PURE_LOCALS')
+USE_FAST_LOCALS = os.environ.get('USE_FAST_LOCALS')
 
 
 class bgThread(threading.Thread):
@@ -70,18 +72,21 @@ class bgThread(threading.Thread):
         self._is_shutdown.set()
         self._is_stopped.wait()
         if self.is_alive():
-            self.join(1e100)
+            self.join(THREAD_TIMEOUT_MAX)
 
 try:
     from greenlet import getcurrent as get_ident
 except ImportError:  # pragma: no cover
     try:
-        from thread import get_ident  # noqa
-    except ImportError:  # pragma: no cover
+        from _thread import get_ident                   # noqa
+    except ImportError:
         try:
-            from dummy_thread import get_ident  # noqa
+            from thread import get_ident                # noqa
         except ImportError:  # pragma: no cover
-            from _thread import get_ident  # noqa
+            try:
+                from _dummy_thread import get_ident     # noqa
+            except ImportError:
+                from dummy_thread import get_ident      # noqa
 
 
 def release_local(local):
@@ -115,7 +120,7 @@ class Local(object):
         object.__setattr__(self, '__ident_func__', get_ident)
 
     def __iter__(self):
-        return iter(self.__storage__.items())
+        return items(self.__storage__)
 
     def __call__(self, proxy):
         """Create a proxy for a name."""
@@ -214,6 +219,10 @@ class _LocalStack(object):
         else:
             return stack.pop()
 
+    def __len__(self):
+        stack = getattr(self._local, 'stack', None)
+        return len(stack) if stack else 0
+
     @property
     def stack(self):
         """get_current_worker_task uses this to find
@@ -281,6 +290,14 @@ class LocalManager(object):
             self.__class__.__name__, len(self.locals))
 
 
+@contextmanager
+def default_socket_timeout(timeout):
+    prev = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout)
+    yield
+    socket.setdefaulttimeout(prev)
+
+
 class _FastLocalStack(threading.local):
 
     def __init__(self):
@@ -295,7 +312,10 @@ class _FastLocalStack(threading.local):
         except (AttributeError, IndexError):
             return None
 
-if detect_environment() == 'default' and not USE_PURE_LOCALS:
+    def __len__(self):
+        return len(self.stack)
+
+if USE_FAST_LOCALS:
     LocalStack = _FastLocalStack
 else:
     # - See #706

@@ -20,6 +20,7 @@
     celery.app.builtins
     celery.app.log
     celery.app.utils
+    celery.bootsteps
     celery.task
     celery.task.base
     celery.result
@@ -45,9 +46,10 @@
     celery.apps.worker
     celery.apps.beat
     celery.bin.base
-    celery.bin.celeryd
-    celery.bin.celerybeat
-    celery.bin.celeryev
     celery.bin.celery
-    celery.bin.camqadm
-    celery.bin.celeryd_multi
+    celery.bin.worker
+    celery.bin.beat
+    celery.bin.events
+    celery.bin.amqp
+    celery.bin.multi
+    celery.bin.graph

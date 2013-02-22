@@ -27,6 +27,7 @@ from kombu.utils import cached_property
 
 from celery import states
 from celery.exceptions import ImproperlyConfigured
+from celery.five import string_t
 from celery.utils.timeutils import maybe_timedelta
 
 from .base import BaseBackend
@@ -45,6 +46,7 @@ class MongoBackend(BaseBackend):
     mongodb_password = None
     mongodb_database = 'celery'
     mongodb_taskmeta_collection = 'celery_taskmeta'
+    mongodb_max_pool_size = 10
 
     def __init__(self, *args, **kwargs):
         """Initialize MongoDB backend instance.
@@ -55,7 +57,7 @@ class MongoBackend(BaseBackend):
         """
         super(MongoBackend, self).__init__(*args, **kwargs)
         self.expires = kwargs.get('expires') or maybe_timedelta(
-                                    self.app.conf.CELERY_TASK_RESULT_EXPIRES)
+            self.app.conf.CELERY_TASK_RESULT_EXPIRES)
 
         if not pymongo:
             raise ImproperlyConfigured(
@@ -72,11 +74,13 @@ class MongoBackend(BaseBackend):
             self.mongodb_port = int(config.get('port', self.mongodb_port))
             self.mongodb_user = config.get('user', self.mongodb_user)
             self.mongodb_password = config.get(
-                    'password', self.mongodb_password)
+                'password', self.mongodb_password)
             self.mongodb_database = config.get(
-                    'database', self.mongodb_database)
+                'database', self.mongodb_database)
             self.mongodb_taskmeta_collection = config.get(
                 'taskmeta_collection', self.mongodb_taskmeta_collection)
+            self.mongodb_max_pool_size = config.get(
+                'max_pool_size', self.mongodb_max_pool_size)
 
         self._connection = None
 
@@ -92,11 +96,12 @@ class MongoBackend(BaseBackend):
             # This enables the use of replica sets and sharding.
             # See pymongo.Connection() for more info.
             args = [self.mongodb_host]
-            if isinstance(self.mongodb_host, basestring) \
+            kwargs = {'max_pool_size': self.mongodb_max_pool_size}
+            if isinstance(self.mongodb_host, string_t) \
                     and not self.mongodb_host.startswith('mongodb://'):
                 args.append(self.mongodb_port)
 
-            self._connection = Connection(*args)
+            self._connection = Connection(*args, **kwargs)
 
         return self._connection
 
@@ -177,11 +182,9 @@ class MongoBackend(BaseBackend):
 
     def cleanup(self):
         """Delete expired metadata."""
-        self.collection.remove({
-                'date_done': {
-                    '$lt': self.app.now() - self.expires,
-                 }
-        })
+        self.collection.remove(
+            {'date_done': {'$lt': self.app.now() - self.expires}},
+        )
 
     def __reduce__(self, args=(), kwargs={}):
         kwargs.update(

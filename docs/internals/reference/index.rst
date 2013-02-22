@@ -9,7 +9,9 @@
     :maxdepth: 1
 
     celery.worker
+    celery.worker.components
     celery.worker.consumer
+    celery.worker.loops
     celery.worker.job
     celery.worker.mediator
     celery.worker.buckets
@@ -18,9 +20,9 @@
     celery.worker.control
     celery.worker.state
     celery.worker.strategy
+    celery.worker.pidbox
     celery.worker.autoreload
     celery.worker.autoscale
-    celery.worker.bootsteps
     celery.concurrency
     celery.concurrency.solo
     celery.concurrency.processes
@@ -31,6 +33,7 @@
     celery.beat
     celery.backends
     celery.backends.base
+    celery.backends.rpc
     celery.backends.database
     celery.backends.cache
     celery.backends.amqp
@@ -53,10 +56,13 @@
     celery.backends.database.session
     celery.utils
     celery.utils.functional
+    celery.utils.objects
     celery.utils.term
     celery.utils.timeutils
+    celery.utils.iso8601
     celery.utils.compat
     celery.utils.serialization
+    celery.utils.sysinfo
     celery.utils.threads
     celery.utils.timer2
     celery.utils.imports

@@ -11,6 +11,7 @@
 """
 from __future__ import absolute_import
 
+import os
 import threading
 import weakref
 
@@ -36,14 +37,18 @@ _task_stack = LocalStack()
 
 def set_default_app(app):
     global default_app
-    if default_app is None:
-        default_app = app
+    default_app = app
 
 
 def get_current_app():
     if default_app is None:
-        # creates the default app, but we want to defer that.
-        import celery.app  # noqa
+        #: creates the global fallback app instance.
+        from celery.app import Celery
+        set_default_app(Celery(
+            'default',
+            loader=os.environ.get('CELERY_LOADER') or 'default',
+            set_as_current=False, accept_magic_kwargs=True,
+        ))
     return _tls.current_app or default_app
 
 

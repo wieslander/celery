@@ -1,9 +1,11 @@
 from __future__ import absolute_import
 
+import pickle
 import socket
 
 from datetime import timedelta
-from Queue import Empty, Queue
+
+from mock import patch
 
 from celery import current_app
 from celery import states
@@ -11,9 +13,10 @@ from celery.app import app_or_default
 from celery.backends.amqp import AMQPBackend
 from celery.datastructures import ExceptionInfo
 from celery.exceptions import TimeoutError
+from celery.five import Empty, Queue, range
 from celery.utils import uuid
 
-from celery.tests.utils import AppCase, sleepdeprived
+from celery.tests.utils import AppCase, sleepdeprived, Mock
 
 
 class SomeClass(object):
@@ -129,11 +132,14 @@ class test_AMQPBackend(AppCase):
             def __init__(self, **merge):
                 self.payload = dict({'status': states.STARTED,
                                      'result': None}, **merge)
+                self.body = pickle.dumps(self.payload)
+                self.content_type = 'application/x-python-serialize'
+                self.content_encoding = 'binary'
 
         class MockBinding(object):
 
             def __init__(self, *args, **kwargs):
-                pass
+                self.channel = Mock()
 
             def __call__(self, *args, **kwargs):
                 return self
@@ -147,10 +153,14 @@ class test_AMQPBackend(AppCase):
                 except Empty:
                     pass
 
+            def is_bound(self):
+                return True
+
         class MockBackend(AMQPBackend):
             Queue = MockBinding
 
         backend = MockBackend()
+        backend._republish = Mock()
 
         # FFWD's to the latest state.
         results.put(Message(status=states.RECEIVED, seq=1))
@@ -159,13 +169,15 @@ class test_AMQPBackend(AppCase):
         r1 = backend.get_task_meta(uuid())
         self.assertDictContainsSubset({'status': states.FAILURE,
                                        'seq': 3}, r1,
-                                       'FFWDs to the last state')
+                                      'FFWDs to the last state')
 
         # Caches last known state.
         results.put(Message())
         tid = uuid()
         backend.get_task_meta(tid)
         self.assertIn(tid, backend._cache, 'Caches last known state')
+
+        self.assertTrue(backend._republish.called)
 
         # Returns cache if no new states.
         results.queue.clear()
@@ -214,18 +226,18 @@ class test_AMQPBackend(AppCase):
         b = self.create_backend()
 
         tids = []
-        for i in xrange(10):
+        for i in range(10):
             tid = uuid()
             b.store_result(tid, i, states.SUCCESS)
             tids.append(tid)
 
         res = list(b.get_many(tids, timeout=1))
         expected_results = [(tid, {'status': states.SUCCESS,
-                                    'result': i,
-                                    'traceback': None,
-                                    'task_id': tid,
-                                    'children': None})
-                                for i, tid in enumerate(tids)]
+                                   'result': i,
+                                   'traceback': None,
+                                   'task_id': tid,
+                                   'children': None})
+                            for i, tid in enumerate(tids)]
         self.assertEqual(sorted(res), sorted(expected_results))
         self.assertDictEqual(b._cache[res[0][0]], res[0][1])
         cached_res = list(b.get_many(tids, timeout=1))
@@ -246,15 +258,11 @@ class test_AMQPBackend(AppCase):
             next(b.get_many(['id1']))
 
     def test_test_get_many_raises_inner_block(self):
-
-        class Backend(AMQPBackend):
-
-            def drain_events(self, *args, **kwargs):
-                raise KeyError('foo')
-
-        b = Backend()
-        with self.assertRaises(KeyError):
-            next(b.get_many(['id1']))
+        with patch('kombu.connection.Connection.drain_events') as drain:
+            drain.side_effect = KeyError('foo')
+            b = AMQPBackend()
+            with self.assertRaises(KeyError):
+                next(b.get_many(['id1']))
 
     def test_no_expires(self):
         b = self.create_backend(expires=None)

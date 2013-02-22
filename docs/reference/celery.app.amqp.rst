@@ -13,7 +13,7 @@
         .. attribute:: Connection
 
             Broker connection class used.  Default is
-            :class:`kombu.connection.Connection`.
+            :class:`kombu.Connection`.
 
         .. attribute:: Consumer
 
@@ -39,16 +39,8 @@
     ------
 
     .. autoclass:: Queues
-
-        .. automethod:: add
-
-        .. automethod:: format
-
-        .. automethod:: select_subset
-
-        .. automethod:: new_missing
-
-        .. autoattribute:: consume_from
+        :members:
+        :undoc-members:
 
     TaskPublisher
     -------------

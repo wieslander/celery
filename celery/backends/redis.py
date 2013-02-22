@@ -8,10 +8,10 @@
 """
 from __future__ import absolute_import
 
+from kombu.utils import cached_property
 from kombu.utils.url import _parse_url
 
 from celery.exceptions import ImproperlyConfigured
-from celery.utils import cached_property
 
 from .base import KeyValueStoreBackend
 
@@ -21,6 +21,10 @@ try:
 except ImportError:         # pragma: no cover
     redis = None            # noqa
     ConnectionError = None  # noqa
+
+REDIS_MISSING = """\
+You need to install the redis library in order to use \
+the Redis result store backend."""
 
 
 class RedisBackend(KeyValueStoreBackend):
@@ -48,13 +52,11 @@ class RedisBackend(KeyValueStoreBackend):
     implements_incr = True
 
     def __init__(self, host=None, port=None, db=None, password=None,
-            expires=None, max_connections=None, url=None, **kwargs):
+                 expires=None, max_connections=None, url=None, **kwargs):
         super(RedisBackend, self).__init__(**kwargs)
         conf = self.app.conf
         if self.redis is None:
-            raise ImproperlyConfigured(
-                    'You need to install the redis library in order to use '
-                  + 'the Redis result store backend.')
+            raise ImproperlyConfigured(REDIS_MISSING)
 
         # For compatibility with the old REDIS_* configuration keys.
         def _get(key):

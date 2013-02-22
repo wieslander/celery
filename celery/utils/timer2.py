@@ -14,15 +14,17 @@ import os
 import sys
 import threading
 
+from datetime import datetime
 from functools import wraps
-from itertools import count, imap
-from time import time, sleep, mktime
+from itertools import count
+from time import time, sleep
 
-from datetime import datetime, timedelta
+from celery.five import THREAD_TIMEOUT_MAX, map
+from celery.utils.timeutils import timedelta_seconds, timezone
 from kombu.log import get_logger
 
 VERSION = (1, 0, 0)
-__version__ = '.'.join(imap(str, VERSION))
+__version__ = '.'.join(map(str, VERSION))
 __author__ = 'Ask Solem'
 __contact__ = 'ask@celeryproject.org'
 __homepage__ = 'http://github.com/ask/timer2/'
@@ -30,6 +32,7 @@ __docformat__ = 'restructuredtext'
 
 DEFAULT_MAX_INTERVAL = 2
 TIMER_DEBUG = os.environ.get('TIMER_DEBUG')
+EPOCH = datetime.utcfromtimestamp(0).replace(tzinfo=timezone.utc)
 
 logger = get_logger('timer2')
 
@@ -51,7 +54,7 @@ class Entry(object):
 
     def __repr__(self):
         return '<TimerEntry: {0}(*{1!r}, **{2!r})'.format(
-                self.fun.__name__, self.args, self.kwargs)
+            self.fun.__name__, self.args, self.kwargs)
 
     if sys.version_info[0] == 3:  # pragma: no cover
 
@@ -68,9 +71,11 @@ class Entry(object):
             return hash(self) == hash(other)
 
 
-def to_timestamp(d):
+def to_timestamp(d, default_timezone=timezone.utc):
     if isinstance(d, datetime):
-        return mktime(d.timetuple())
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=default_timezone)
+        return timedelta_seconds(d - EPOCH)
     return d
 
 
@@ -109,11 +114,11 @@ class Schedule(object):
 
         """
         if eta is None:
-            eta = datetime.now()
+            eta = time()
         if isinstance(eta, datetime):
             try:
                 eta = to_timestamp(eta)
-            except OverflowError as exc:
+            except Exception as exc:
                 if not self.handle_error(exc):
                     raise
                 return
@@ -127,8 +132,7 @@ class Schedule(object):
         return self.enter(self.Entry(fun, args, kwargs), eta, priority)
 
     def enter_after(self, msecs, entry, priority=0):
-        eta = datetime.now() + timedelta(seconds=msecs / 1000.0)
-        return self.enter(entry, eta, priority)
+        return self.enter(entry, time() + (msecs / 1000.0), priority)
 
     def apply_after(self, msecs, fun, args=(), kwargs={}, priority=0):
         return self.enter_after(msecs, self.Entry(fun, args, kwargs), priority)
@@ -197,7 +201,7 @@ class Schedule(object):
 
     def info(self):
         return ({'eta': eta, 'priority': priority, 'item': item}
-                    for eta, priority, item in self.queue)
+                for eta, priority, item in self.queue)
 
     def cancel(self, tref):
         tref.cancel()
@@ -214,7 +218,7 @@ class Timer(threading.Thread):
 
     running = False
     on_tick = None
-    _timer_count = count(1).next
+    _timer_count = count(1)
 
     if TIMER_DEBUG:  # pragma: no cover
         def start(self, *args, **kwargs):
@@ -224,7 +228,7 @@ class Timer(threading.Thread):
             super(Timer, self).start(*args, **kwargs)
 
     def __init__(self, schedule=None, on_error=None, on_tick=None,
-            max_interval=None, **kwargs):
+                 max_interval=None, **kwargs):
         self.schedule = schedule or self.Schedule(on_error=on_error,
                                                   max_interval=max_interval)
         self.on_tick = on_tick or self.on_tick
@@ -234,7 +238,7 @@ class Timer(threading.Thread):
         self.mutex = threading.Lock()
         self.not_empty = threading.Condition(self.mutex)
         self.daemon = True
-        self.name = 'Timer-{0}'.format(self._timer_count())
+        self.name = 'Timer-{0}'.format(next(self._timer_count))
 
     def _next_entry(self):
         with self.not_empty:
@@ -273,7 +277,7 @@ class Timer(threading.Thread):
         if self.running:
             self._is_shutdown.set()
             self._is_stopped.wait()
-            self.join(1e10)
+            self.join(THREAD_TIMEOUT_MAX)
             self.running = False
 
     def ensure_started(self):

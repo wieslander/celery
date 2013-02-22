@@ -10,6 +10,7 @@
 from __future__ import absolute_import
 
 from celery.exceptions import QueueNotFound
+from celery.five import string_t
 from celery.utils import lpmerge
 from celery.utils.functional import firstmethod, mpromise
 from celery.utils.imports import instantiate
@@ -31,8 +32,8 @@ class MapRoute(object):
 
 class Router(object):
 
-    def __init__(self, routes=None, queues=None, create_missing=False,
-            app=None):
+    def __init__(self, routes=None, queues=None,
+                 create_missing=False, app=None):
         self.app = app
         self.queues = {} if queues is None else queues
         self.routes = [] if routes is None else routes
@@ -51,16 +52,16 @@ class Router(object):
 
     def expand_destination(self, route):
         # Route can be a queue name: convenient for direct exchanges.
-        if isinstance(route, basestring):
+        if isinstance(route, string_t):
             queue, route = route, {}
         else:
             # can use defaults from configured queue, but override specific
             # things (like the routing_key): great for topic exchanges.
             queue = route.pop('queue', None)
 
-        if queue:  # expand config from configured queue.
+        if queue:
             try:
-                dest = self.queues[queue].as_dict()
+                Q = self.queues[queue]  # noqa
             except KeyError:
                 if not self.create_missing:
                     raise QueueNotFound(
@@ -68,10 +69,9 @@ class Router(object):
                 for key in 'exchange', 'routing_key':
                     if route.get(key) is None:
                         route[key] = queue
-                dest = self.app.amqp.queues.add(queue, **route).as_dict()
+                Q = self.app.amqp.queues.add(queue, **route)
             # needs to be declared by publisher
-            dest['queue'] = queue
-            return lpmerge(dest, route)
+            route['queue'] = Q
         return route
 
     def lookup_route(self, task, args=None, kwargs=None):
@@ -84,7 +84,7 @@ def prepare(routes):
     def expand_route(route):
         if isinstance(route, dict):
             return MapRoute(route)
-        if isinstance(route, basestring):
+        if isinstance(route, string_t):
             return mpromise(instantiate, route)
         return route
 

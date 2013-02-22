@@ -36,7 +36,7 @@ def try_while(fun, reason='Timed out', timeout=10, interval=0.5):
 
 class Worker(object):
     started = False
-    next_worker_id = count(1).next
+    worker_ids = count(1)
     _shutdown_called = False
 
     def __init__(self, hostname, loglevel='error'):
@@ -52,9 +52,9 @@ class Worker(object):
         pid = os.fork()
         if pid == 0:
             from celery import current_app
-            current_app.worker_main(['celeryd', '--loglevel=INFO',
-                                                '-n', self.hostname,
-                                                '-P', 'solo'])
+            current_app.worker_main(['worker', '--loglevel=INFO',
+                                               '-n', self.hostname,
+                                               '-P', 'solo'])
             os._exit(0)
         self.pid = pid
 
@@ -64,16 +64,20 @@ class Worker(object):
         return self.hostname in flatten_reply(r)
 
     def wait_until_started(self, timeout=10, interval=0.5):
-        try_while(lambda: self.is_alive(interval),
-                "Worker won't start (after %s secs.)" % timeout,
-                interval=interval, timeout=timeout)
+        try_while(
+            lambda: self.is_alive(interval),
+            "Worker won't start (after %s secs.)" % timeout,
+            interval=interval, timeout=timeout,
+        )
         say('--WORKER %s IS ONLINE--' % self.hostname)
 
     def ensure_shutdown(self, timeout=10, interval=0.5):
         os.kill(self.pid, signal.SIGTERM)
-        try_while(lambda: not self.is_alive(interval),
-                  "Worker won't shutdown (after %s secs.)" % timeout,
-                  timeout=10, interval=0.5)
+        try_while(
+            lambda: not self.is_alive(interval),
+            "Worker won't shutdown (after %s secs.)" % timeout,
+            timeout=10, interval=0.5,
+        )
         say('--WORKER %s IS SHUTDOWN--' % self.hostname)
         self._shutdown_called = True
 
@@ -87,7 +91,7 @@ class Worker(object):
         if caller:
             hostname = '.'.join([qualname(caller), hostname])
         else:
-            hostname += str(cls.next_worker_id())
+            hostname += str(next(cls.worker_ids()))
         worker = cls(hostname)
         worker.ensure_started()
         stack = traceback.format_stack()
@@ -96,8 +100,8 @@ class Worker(object):
         def _ensure_shutdown_once():
             if not worker._shutdown_called:
                 say('-- Found worker not stopped at shutdown: %s\n%s' % (
-                        worker.hostname,
-                        '\n'.join(stack)))
+                    worker.hostname,
+                    '\n'.join(stack)))
                 worker.ensure_shutdown()
 
         return worker
@@ -109,7 +113,7 @@ class WorkerCase(Case):
 
     @classmethod
     def setUpClass(cls):
-        logging.getLogger('amqplib').setLevel(logging.ERROR)
+        logging.getLogger('amqp').setLevel(logging.ERROR)
         cls.worker = Worker.managed(cls.hostname, caller=cls)
 
     @classmethod
@@ -161,10 +165,10 @@ class WorkerCase(Case):
 
     def ensure_received(self, task_id, interval=0.5, timeout=10):
         return try_while(lambda: self.is_received(task_id, interval),
-                        'Task not receied within timeout',
-                        interval=0.5, timeout=10)
+                         'Task not receied within timeout',
+                         interval=0.5, timeout=10)
 
     def ensure_scheduled(self, task_id, interval=0.5, timeout=10):
         return try_while(lambda: self.is_scheduled(task_id, interval),
-                        'Task not scheduled within timeout',
-                        interval=0.5, timeout=10)
+                         'Task not scheduled within timeout',
+                         interval=0.5, timeout=10)

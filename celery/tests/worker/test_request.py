@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from __future__ import absolute_import
+from __future__ import absolute_import, unicode_literals
 
 import anyjson
 import os
@@ -25,12 +25,15 @@ from celery.exceptions import (
     InvalidTaskError,
     TaskRevokedError,
 )
+from celery.five import keys
 from celery.task.trace import (
     trace_task,
-    trace_task_ret,
+    _trace_task_ret,
     TraceInfo,
     mro_lookup,
     build_tracer,
+    setup_worker_optimizations,
+    reset_worker_optimizations,
 )
 from celery.result import AsyncResult
 from celery.signals import task_revoked
@@ -41,7 +44,7 @@ from celery.worker import job as module
 from celery.worker.job import Request, TaskRequest
 from celery.worker.state import revoked
 
-from celery.tests.utils import Case, assert_signal_called
+from celery.tests.utils import AppCase, Case, assert_signal_called
 
 scratch = {'ACK': False}
 some_kwargs_scratchpad = {}
@@ -80,8 +83,9 @@ def jail(task_id, name, args, kwargs):
     request = {'id': task_id}
     task = current_app.tasks[name]
     task.__trace__ = None  # rebuild
-    return trace_task(task,
-            task_id, args, kwargs, request=request, eager=False)
+    return trace_task(
+        task, task_id, args, kwargs, request=request, eager=False,
+    )
 
 
 def on_ack(*args, **kwargs):
@@ -125,16 +129,18 @@ class test_default_encode(Case):
     def test_jython(self):
         prev, sys.platform = sys.platform, 'java 1.6.1'
         try:
-            self.assertEqual(default_encode('foo'), 'foo')
+            self.assertEqual(default_encode(bytes('foo')), 'foo')
         finally:
             sys.platform = prev
 
-    def test_cython(self):
+    def test_cpython(self):
         prev, sys.platform = sys.platform, 'darwin'
-        gfe, sys.getfilesystemencoding = sys.getfilesystemencoding, \
-                                         lambda: 'utf-8'
+        gfe, sys.getfilesystemencoding = (
+            sys.getfilesystemencoding,
+            lambda: 'utf-8',
+        )
         try:
-            self.assertEqual(default_encode('foo'), 'foo')
+            self.assertEqual(default_encode(bytes('foo')), 'foo')
         finally:
             sys.platform = prev
             sys.getfilesystemencoding = gfe
@@ -231,7 +237,7 @@ class MockEventDispatcher(object):
         self.sent.append(event)
 
 
-class test_TaskRequest(Case):
+class test_TaskRequest(AppCase):
 
     def test_task_wrapper_repr(self):
         tw = TaskRequest(mytask.name, uuid(), [1], {'f': 'x'})
@@ -330,8 +336,10 @@ class test_TaskRequest(Case):
                          expires=datetime.utcnow() + timedelta(days=1))
         tw.revoked()
         self.assertNotIn(tw.id, revoked)
-        self.assertNotEqual(mytask.backend.get_status(tw.id),
-                         states.REVOKED)
+        self.assertNotEqual(
+            mytask.backend.get_status(tw.id),
+            states.REVOKED,
+        )
 
     def test_revoked_expires_ignore_result(self):
         mytask.ignore_result = True
@@ -570,10 +578,34 @@ class test_TaskRequest(Case):
         finally:
             mytask.ignore_result = False
 
+    def test_fast_trace_task(self):
+        from celery.task import trace
+        setup_worker_optimizations(self.app)
+        self.assertIs(trace.trace_task_ret, trace._fast_trace_task)
+        try:
+            mytask.__trace__ = build_tracer(mytask.name, mytask,
+                                            self.app.loader, 'test')
+            res = trace.trace_task_ret(mytask.name, uuid(), [4], {})
+            self.assertEqual(res, 4 ** 4)
+        finally:
+            reset_worker_optimizations()
+            self.assertIs(trace.trace_task_ret, trace._trace_task_ret)
+        delattr(mytask, '__trace__')
+        res = trace.trace_task_ret(mytask.name, uuid(), [4], {})
+        self.assertEqual(res, 4 ** 4)
+
     def test_trace_task_ret(self):
         mytask.__trace__ = build_tracer(mytask.name, mytask,
-                                        current_app.loader, 'test')
-        res = trace_task_ret(mytask.name, uuid(), [4], {})
+                                        self.app.loader, 'test')
+        res = _trace_task_ret(mytask.name, uuid(), [4], {})
+        self.assertEqual(res, 4 ** 4)
+
+    def test_trace_task_ret__no_trace(self):
+        try:
+            delattr(mytask, '__trace__')
+        except AttributeError:
+            pass
+        res = _trace_task_ret(mytask.name, uuid(), [4], {})
         self.assertEqual(res, 4 ** 4)
 
     def test_execute_safe_catches_exception(self):
@@ -585,15 +617,15 @@ class test_TaskRequest(Case):
         def raising():
             raise KeyError('baz')
 
-        with self.assertWarnsRegex(RuntimeWarning,
-                r'Exception raised outside'):
+        with self.assertWarnsRegex(
+                RuntimeWarning, r'Exception raised outside'):
             res = trace_task(raising, uuid(), [], {})
             self.assertIsInstance(res, ExceptionInfo)
 
     def test_worker_task_trace_handle_retry(self):
         from celery.exceptions import RetryTaskError
         tid = uuid()
-        mytask.request.update({'id': tid})
+        mytask.push_request(id=tid)
         try:
             raise ValueError('foo')
         except Exception as exc:
@@ -608,12 +640,13 @@ class test_TaskRequest(Case):
                 self.assertEqual(mytask.backend.get_status(tid),
                                  states.RETRY)
         finally:
-            mytask.request.clear()
+            mytask.pop_request()
 
     def test_worker_task_trace_handle_failure(self):
         tid = uuid()
-        mytask.request.update({'id': tid})
+        mytask.push_request()
         try:
+            mytask.request.id = tid
             try:
                 raise ValueError('foo')
             except Exception as exc:
@@ -625,28 +658,32 @@ class test_TaskRequest(Case):
                 self.assertEqual(mytask.backend.get_status(tid),
                                  states.FAILURE)
         finally:
-            mytask.request.clear()
+            mytask.pop_request()
 
     def test_task_wrapper_mail_attrs(self):
         tw = TaskRequest(mytask.name, uuid(), [], {})
-        x = tw.success_msg % {'name': tw.name,
-                              'id': tw.id,
-                              'return_value': 10,
-                              'runtime': 0.3641}
+        x = tw.success_msg % {
+            'name': tw.name,
+            'id': tw.id,
+            'return_value': 10,
+            'runtime': 0.3641,
+        }
         self.assertTrue(x)
-        x = tw.error_msg % {'name': tw.name,
-                           'id': tw.id,
-                           'exc': 'FOOBARBAZ',
-                           'traceback': 'foobarbaz'}
+        x = tw.error_msg % {
+            'name': tw.name,
+            'id': tw.id,
+            'exc': 'FOOBARBAZ',
+            'traceback': 'foobarbaz',
+        }
         self.assertTrue(x)
 
     def test_from_message(self):
-        us = u'æØåveéðƒeæ'
+        us = 'æØåveéðƒeæ'
         body = {'task': mytask.name, 'id': uuid(),
                 'args': [2], 'kwargs': {us: 'bar'}}
         m = Message(None, body=anyjson.dumps(body), backend='foo',
-                          content_type='application/json',
-                          content_encoding='utf-8')
+                    content_type='application/json',
+                    content_encoding='utf-8')
         tw = TaskRequest.from_message(m, m.decode())
         self.assertIsInstance(tw, Request)
         self.assertEqual(tw.name, body['task'])
@@ -654,14 +691,14 @@ class test_TaskRequest(Case):
         self.assertEqual(tw.args, body['args'])
         us = from_utf8(us)
         if sys.version_info < (2, 6):
-            self.assertEqual(tw.kwargs.keys()[0], us)
-            self.assertIsInstance(tw.kwargs.keys()[0], str)
+            self.assertEqual(next(keys(tw.kwargs)), us)
+            self.assertIsInstance(next(keys(tw.kwargs)), str)
 
     def test_from_message_empty_args(self):
         body = {'task': mytask.name, 'id': uuid()}
         m = Message(None, body=anyjson.dumps(body), backend='foo',
-                          content_type='application/json',
-                          content_encoding='utf-8')
+                    content_type='application/json',
+                    content_encoding='utf-8')
         tw = TaskRequest.from_message(m, m.decode())
         self.assertIsInstance(tw, Request)
         self.assertEquals(tw.args, [])
@@ -670,17 +707,17 @@ class test_TaskRequest(Case):
     def test_from_message_missing_required_fields(self):
         body = {}
         m = Message(None, body=anyjson.dumps(body), backend='foo',
-                          content_type='application/json',
-                          content_encoding='utf-8')
+                    content_type='application/json',
+                    content_encoding='utf-8')
         with self.assertRaises(KeyError):
             TaskRequest.from_message(m, m.decode())
 
     def test_from_message_nonexistant_task(self):
         body = {'task': 'cu.mytask.doesnotexist', 'id': uuid(),
-                'args': [2], 'kwargs': {u'æØåveéðƒeæ': 'bar'}}
+                'args': [2], 'kwargs': {'æØåveéðƒeæ': 'bar'}}
         m = Message(None, body=anyjson.dumps(body), backend='foo',
-                          content_type='application/json',
-                          content_encoding='utf-8')
+                    content_type='application/json',
+                    content_encoding='utf-8')
         with self.assertRaises(KeyError):
             TaskRequest.from_message(m, m.decode())
 
@@ -712,7 +749,7 @@ class test_TaskRequest(Case):
     def test_execute_ack(self):
         tid = uuid()
         tw = TaskRequest(mytask.name, tid, [4], {'f': 'x'},
-                        on_ack=on_ack)
+                         on_ack=on_ack)
         self.assertEqual(tw.execute(), 256)
         meta = mytask.backend.get_task_meta(tid)
         self.assertTrue(scratch['ACK'])
@@ -740,7 +777,7 @@ class test_TaskRequest(Case):
                 pass
 
             def apply_async(self, target, args=None, kwargs=None,
-                    *margs, **mkwargs):
+                            *margs, **mkwargs):
                 self.target = target
                 self.args = args
                 self.kwargs = kwargs
@@ -761,19 +798,19 @@ class test_TaskRequest(Case):
         tid = uuid()
         tw = TaskRequest(mytask.name, tid, [4], {'f': 'x'})
         self.assertDictEqual(
-                tw.extend_with_default_kwargs(), {
-                    'f': 'x',
-                    'logfile': None,
-                    'loglevel': None,
-                    'task_id': tw.id,
-                    'task_retries': 0,
-                    'task_is_eager': False,
-                    'delivery_info': {
-                        'exchange': None,
-                        'routing_key': None,
-                        'priority': None,
-                    },
-                    'task_name': tw.name})
+            tw.extend_with_default_kwargs(), {
+                'f': 'x',
+                'logfile': None,
+                'loglevel': None,
+                'task_id': tw.id,
+                'task_retries': 0,
+                'task_is_eager': False,
+                'delivery_info': {
+                    'exchange': None,
+                    'routing_key': None,
+                    'priority': None,
+                },
+                'task_name': tw.name})
 
     @patch('celery.worker.job.logger')
     def _test_on_failure(self, exception, logger):
@@ -798,8 +835,8 @@ class test_TaskRequest(Case):
         self._test_on_failure(Exception('Inside unit tests'))
 
     def test_on_failure_unicode_exception(self):
-        self._test_on_failure(Exception(u'Бобры атакуют'))
+        self._test_on_failure(Exception('Бобры атакуют'))
 
     def test_on_failure_utf8_exception(self):
         self._test_on_failure(Exception(
-            from_utf8(u'Бобры атакуют')))
+            from_utf8('Бобры атакуют')))

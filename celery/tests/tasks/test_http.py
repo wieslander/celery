@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from __future__ import absolute_import
+from __future__ import absolute_import, unicode_literals
 
 from contextlib import contextmanager
 from functools import wraps
@@ -11,27 +11,27 @@ except ImportError:  # py3k
 from anyjson import dumps
 from kombu.utils.encoding import from_utf8
 
+from celery.five import StringIO, items
 from celery.task import http
 from celery.tests.utils import Case, eager_tasks
-from celery.utils.compat import StringIO
 
 
 @contextmanager
 def mock_urlopen(response_method):
 
-    import urllib2
-    urlopen = urllib2.urlopen
+    urlopen = http.urlopen
 
     @wraps(urlopen)
     def _mocked(url, *args, **kwargs):
         response_data, headers = response_method(url)
         return addinfourl(StringIO(response_data), headers, url)
 
-    urllib2.urlopen = _mocked
+    http.urlopen = _mocked
 
-    yield True
-
-    urllib2.urlopen = urlopen
+    try:
+        yield True
+    finally:
+        http.urlopen = urlopen
 
 
 def _response(res):
@@ -54,10 +54,10 @@ class test_encodings(Case):
 
     def test_utf8dict(self):
         uk = 'foobar'
-        d = {u'følelser ær langé': u'ærbadægzaååÆØÅ',
+        d = {'følelser ær langé': 'ærbadægzaååÆØÅ',
              from_utf8(uk): from_utf8('xuzzybaz')}
 
-        for key, value in http.utf8dict(d.items()).items():
+        for key, value in items(http.utf8dict(items(d))):
             self.assertIsInstance(key, str)
             self.assertIsInstance(value, str)
 
@@ -80,8 +80,10 @@ class test_MutableURL(Case):
         url = 'https://e.com:808/foo/bar#zeta?x=10&y=20'
         url = http.MutableURL(url)
 
-        self.assertEqual(str(url).split('?')[0],
-            'https://e.com:808/foo/bar#zeta')
+        self.assertEqual(
+            str(url).split('?')[0],
+            'https://e.com:808/foo/bar#zeta',
+        )
 
     def test___repr__(self):
         url = http.MutableURL('http://e.com/foo/bar')
@@ -99,41 +101,41 @@ class test_HttpDispatch(Case):
     def test_dispatch_success(self):
         with mock_urlopen(success_response(100)):
             d = http.HttpDispatch('http://example.com/mul', 'GET', {
-                                    'x': 10, 'y': 10})
+                'x': 10, 'y': 10})
             self.assertEqual(d.dispatch(), 100)
 
     def test_dispatch_failure(self):
         with mock_urlopen(fail_response('Invalid moon alignment')):
             d = http.HttpDispatch('http://example.com/mul', 'GET', {
-                                    'x': 10, 'y': 10})
+                'x': 10, 'y': 10})
             with self.assertRaises(http.RemoteExecuteError):
                 d.dispatch()
 
     def test_dispatch_empty_response(self):
         with mock_urlopen(_response('')):
             d = http.HttpDispatch('http://example.com/mul', 'GET', {
-                                    'x': 10, 'y': 10})
+                'x': 10, 'y': 10})
             with self.assertRaises(http.InvalidResponseError):
                 d.dispatch()
 
     def test_dispatch_non_json(self):
         with mock_urlopen(_response("{'#{:'''")):
             d = http.HttpDispatch('http://example.com/mul', 'GET', {
-                                    'x': 10, 'y': 10})
+                'x': 10, 'y': 10})
             with self.assertRaises(http.InvalidResponseError):
                 d.dispatch()
 
     def test_dispatch_unknown_status(self):
         with mock_urlopen(unknown_response()):
             d = http.HttpDispatch('http://example.com/mul', 'GET', {
-                                    'x': 10, 'y': 10})
+                'x': 10, 'y': 10})
             with self.assertRaises(http.UnknownStatusError):
                 d.dispatch()
 
     def test_dispatch_POST(self):
         with mock_urlopen(success_response(100)):
             d = http.HttpDispatch('http://example.com/mul', 'POST', {
-                                    'x': 10, 'y': 10})
+                'x': 10, 'y': 10})
             self.assertEqual(d.dispatch(), 100)
 
 

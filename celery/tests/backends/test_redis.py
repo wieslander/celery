@@ -6,13 +6,14 @@ from mock import Mock, patch
 from nose import SkipTest
 from pickle import loads, dumps
 
+from kombu.utils import cached_property, uuid
+
 from celery import current_app
 from celery import states
 from celery.datastructures import AttributeDict
 from celery.exceptions import ImproperlyConfigured
 from celery.result import AsyncResult
 from celery.task import subtask
-from celery.utils import cached_property, uuid
 from celery.utils.timeutils import timedelta_seconds
 
 from celery.tests.utils import Case
@@ -137,8 +138,10 @@ class test_RedisBackend(Case):
         self.assertEqual(b.expires, 60)
 
     def test_on_chord_apply(self):
-        self.Backend().on_chord_apply('group_id', {},
-                                      result=map(AsyncResult, [1, 2, 3]))
+        self.Backend().on_chord_apply(
+            'group_id', {},
+            result=[AsyncResult(x) for x in [1, 2, 3]],
+        )
 
     def test_mget(self):
         b = self.MockBackend()

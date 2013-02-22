@@ -25,8 +25,8 @@ You can start the worker in the foreground by executing the command:
 
     $ celery worker --app=app -l info
 
-For a full list of available command line options see
-:mod:`~celery.bin.celeryd`, or simply do:
+For a full list of available command-line options see
+:mod:`~celery.bin.worker`, or simply do:
 
 .. code-block:: bash
 
@@ -153,8 +153,8 @@ Remote control
 .. sidebar:: The ``celery`` command
 
     The :program:`celery` program is used to execute remote control
-    commands from the command line.  It supports all of the commands
-    listed below.  See :ref:`monitoring-celeryctl` for more information.
+    commands from the command-line.  It supports all of the commands
+    listed below.  See :ref:`monitoring-control` for more information.
 
 pool support: *processes, eventlet, gevent*, blocking:*threads/solo* (see note)
 broker support: *amqp, redis, mongodb*
@@ -314,7 +314,7 @@ time limit kills it:
             clean_up_in_a_hurry()
 
 Time limits can also be set using the :setting:`CELERYD_TASK_TIME_LIMIT` /
-:setting:`CELERYD_SOFT_TASK_TIME_LIMIT` settings.
+:setting:`CELERYD_TASK_SOFT_TIME_LIMIT` settings.
 
 .. note::
 
@@ -837,6 +837,5 @@ Here's an example control command that restarts the broker connection:
 
     @Panel.register
     def reset_connection(panel):
-        panel.logger.critical('Connection reset by remote control.')
         panel.consumer.reset_connection()
         return {'ok': 'connection reset'}

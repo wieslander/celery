@@ -21,9 +21,9 @@ configuration values.
 
     BROKER_URL = 'django://'
 
-#. Add :mod:`djcelery.transport` to `INSTALLED_APPS`::
+#. Add :mod:`kombu.transport.django` to `INSTALLED_APPS`::
 
-    INSTALLED_APPS = ('djcelery.transport', )
+    INSTALLED_APPS = ('kombu.transport.django', )
 
 #. Sync your database schema:
 
@@ -38,7 +38,7 @@ Limitations
 
 The Django database transport does not currently support:
 
-    * Remote control commands (celeryev, broadcast)
+    * Remote control commands (:program:`celery events` command, broadcast)
     * Events, including the Django Admin monitor.
     * Using more than a few workers (can lead to messages being executed
       multiple times).

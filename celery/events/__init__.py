@@ -10,6 +10,7 @@
 """
 from __future__ import absolute_import
 
+import os
 import time
 import socket
 import threading
@@ -17,6 +18,7 @@ import threading
 from collections import deque
 from contextlib import contextmanager
 from copy import copy
+from operator import itemgetter
 
 from kombu import Exchange, Queue, Producer
 from kombu.mixins import ConsumerMixin
@@ -24,8 +26,11 @@ from kombu.utils import cached_property
 
 from celery.app import app_or_default
 from celery.utils import uuid
+from celery.utils.timeutils import adjust_timestamp, utcoffset
 
 event_exchange = Exchange('celeryev', type='topic')
+
+_TZGETTER = itemgetter('utcoffset', 'timestamp')
 
 
 def get_exchange(conn):
@@ -48,6 +53,10 @@ def Event(type, _fields=None, **fields):
     return event
 
 
+def group_from(type):
+    return type.split('-', 1)[0]
+
+
 class EventDispatcher(object):
     """Send events as messages.
 
@@ -55,6 +64,11 @@ class EventDispatcher(object):
 
     :keyword hostname: Hostname to identify ourselves as,
         by default uses the hostname returned by :func:`socket.gethostname`.
+
+    :keyword groups: List of groups to send events for.  :meth:`send` will
+        ignore send requests to groups not in this list.
+        If this is :const:`None`, all events will be sent. Example groups
+        include ``"task"`` and ``"worker"``.
 
     :keyword enabled: Set to :const:`False` to not actually publish any events,
         making :meth:`send` a noop operation.
@@ -69,10 +83,11 @@ class EventDispatcher(object):
     You need to :meth:`close` this after use.
 
     """
+    DISABLED_TRANSPORTS = set(['sql'])
 
     def __init__(self, connection=None, hostname=None, enabled=True,
-            channel=None, buffer_while_offline=True, app=None,
-            serializer=None):
+                 channel=None, buffer_while_offline=True, app=None,
+                 serializer=None, groups=None):
         self.app = app_or_default(app or self.app)
         self.connection = connection
         self.channel = channel
@@ -84,12 +99,18 @@ class EventDispatcher(object):
         self.serializer = serializer or self.app.conf.CELERY_EVENT_SERIALIZER
         self.on_enabled = set()
         self.on_disabled = set()
-
-        self.enabled = enabled
+        self.groups = set(groups or [])
+        self.tzoffset = [-time.timezone, -time.altzone]
+        self.clock = self.app.clock
         if not connection and channel:
             self.connection = channel.connection.client
+        self.enabled = enabled
+        if self.connection.transport.driver_type in self.DISABLED_TRANSPORTS:
+            self.enabled = False
         if self.enabled:
             self.enable()
+        self.headers = {'hostname': self.hostname}
+        self.pid = os.getpid()
 
     def __enter__(self):
         return self
@@ -118,20 +139,33 @@ class EventDispatcher(object):
             for callback in self.on_disabled:
                 callback()
 
-    def send(self, type, **fields):
+    def send(self, type, utcoffset=utcoffset, blind=False,
+             Event=Event, **fields):
         """Send event.
 
         :param type: Kind of event.
+        :keyword utcoffset: Function returning the current utcoffset in hours.
+        :keyword blind: Do not send clock value
         :keyword \*\*fields: Event arguments.
 
         """
         if self.enabled:
+            groups = self.groups
+            if groups and group_from(type) not in groups:
+                return
+
+            clock = None if blind else self.clock.forward()
+
             with self.mutex:
-                event = Event(type, hostname=self.hostname,
-                                    clock=self.app.clock.forward(), **fields)
+                event = Event(type,
+                              hostname=self.hostname,
+                              clock=clock,
+                              utcoffset=utcoffset(),
+                              pid=self.pid, **fields)
                 try:
                     self.publisher.publish(event,
-                                           routing_key=type.replace('-', '.'))
+                                           routing_key=type.replace('-', '.'),
+                                           headers=self.headers)
                 except Exception as exc:
                     if not self.buffer_while_offline:
                         raise
@@ -167,7 +201,7 @@ class EventReceiver(ConsumerMixin):
     """
 
     def __init__(self, connection, handlers=None, routing_key='#',
-            node_id=None, app=None, queue_prefix='celeryev'):
+                 node_id=None, app=None, queue_prefix='celeryev'):
         self.app = app_or_default(app)
         self.connection = connection
         self.handlers = {} if handlers is None else handlers
@@ -179,6 +213,7 @@ class EventReceiver(ConsumerMixin):
                            routing_key=self.routing_key,
                            auto_delete=True,
                            durable=False)
+        self.adjust_clock = self.app.clock.adjust
 
     def get_exchange(self):
         return get_exchange(self.connection)
@@ -194,7 +229,7 @@ class EventReceiver(ConsumerMixin):
                          callbacks=[self._receive], no_ack=True)]
 
     def on_consume_ready(self, connection, channel, consumers,
-            wakeup=True, **kwargs):
+                         wakeup=True, **kwargs):
         if wakeup:
             self.wakeup_workers(channel=channel)
 
@@ -215,12 +250,23 @@ class EventReceiver(ConsumerMixin):
                                    connection=self.connection,
                                    channel=channel)
 
-    def _receive(self, body, message):
-        type = body.pop('type').lower()
+    def event_from_message(self, body, localize=True, now=time.time):
+        type = body.get('type', '').lower()
         clock = body.get('clock')
         if clock:
-            self.app.clock.adjust(clock)
-        self.process(type, Event(type, body))
+            self.adjust_clock(clock)
+
+        if localize:
+            try:
+                offset, timestamp = _TZGETTER(body)
+            except KeyError:
+                pass
+            else:
+                body['timestamp'] = adjust_timestamp(timestamp, offset)
+        return type, Event(type, body, local_received=now())
+
+    def _receive(self, body, message):
+        self.process(*self.event_from_message(body))
 
 
 class Events(object):
@@ -245,7 +291,7 @@ class Events(object):
 
     @contextmanager
     def default_dispatcher(self, hostname=None, enabled=True,
-            buffer_while_offline=False):
+                           buffer_while_offline=False):
         with self.app.amqp.producer_pool.acquire(block=True) as pub:
             with self.Dispatcher(pub.connection, hostname, enabled,
                                  pub.channel, buffer_while_offline) as d:

@@ -12,25 +12,31 @@ import time
 
 from collections import deque
 from copy import copy
-from itertools import imap
+
+from kombu.utils import cached_property
+from kombu.utils.compat import OrderedDict
 
 from . import current_app
 from . import states
 from .app import app_or_default
-from .datastructures import DependencyGraph
+from .datastructures import DependencyGraph, GraphFormatter
 from .exceptions import IncompleteStream, TimeoutError
-from .utils import cached_property
-from .utils.compat import OrderedDict
+from .five import items, map, range, string_t
 
 
 def from_serializable(r):
     # earlier backends may just pickle, so check if
     # result is already prepared.
     if not isinstance(r, ResultBase):
-        id, nodes = r
+        id = parent = None
+        res, nodes = r
         if nodes:
-            return GroupResult(id, [AsyncResult(id) for id, _ in nodes])
-        return AsyncResult(id)
+            return GroupResult(
+                res, [from_serializable(child) for child in nodes],
+            )
+        if isinstance(res, (list, tuple)):
+            id, parent = res[0], res[1]
+        return AsyncResult(id, parent=parent)
     return r
 
 
@@ -60,7 +66,7 @@ class AsyncResult(ResultBase):
     parent = None
 
     def __init__(self, id, backend=None, task_name=None,
-            app=None, parent=None):
+                 app=None, parent=None):
         self.app = app_or_default(app or self.app)
         self.id = id
         self.backend = backend or self.app.backend
@@ -68,7 +74,7 @@ class AsyncResult(ResultBase):
         self.parent = parent
 
     def serializable(self):
-        return self.id, None
+        return [self.id, self.parent and self.parent.id], None
 
     def forget(self):
         """Forget about (and possibly remove the result of) this task."""
@@ -113,10 +119,20 @@ class AsyncResult(ResultBase):
         be re-raised.
 
         """
+        if propagate and self.parent:
+            for node in reversed(list(self._parents())):
+                node.get(propagate=True, timeout=timeout, interval=interval)
+
         return self.backend.wait_for(self.id, timeout=timeout,
-                                              propagate=propagate,
-                                              interval=interval)
+                                     propagate=propagate,
+                                     interval=interval)
     wait = get  # deprecated alias to :meth:`get`.
+
+    def _parents(self):
+        node = self.parent
+        while node:
+            yield node
+            node = node.parent
 
     def collect(self, intermediate=False, **kwargs):
         """Iterator, like :meth:`get` will wait for the task to complete,
@@ -129,7 +145,7 @@ class AsyncResult(ResultBase):
 
             @task()
             def A(how_many):
-                return group(B.s(i) for i in xrange(how_many))
+                return group(B.s(i) for i in range(how_many))
 
             @task()
             def B(i):
@@ -186,11 +202,13 @@ class AsyncResult(ResultBase):
         """Returns :const:`True` if the task failed."""
         return self.state == states.FAILURE
 
-    def build_graph(self, intermediate=False):
-        graph = DependencyGraph()
+    def build_graph(self, intermediate=False, formatter=None):
+        graph = DependencyGraph(
+            formatter=formatter or GraphFormatter(root=self.id, shape='oval'),
+        )
         for parent, node in self.iterdeps(intermediate=intermediate):
+            graph.add_arc(node)
             if parent:
-                graph.add_arc(parent)
                 graph.add_edge(parent, node)
         return graph
 
@@ -208,7 +226,7 @@ class AsyncResult(ResultBase):
     def __eq__(self, other):
         if isinstance(other, AsyncResult):
             return other.id == self.id
-        elif isinstance(other, basestring):
+        elif isinstance(other, string_t):
             return other == self.id
         return NotImplemented
 
@@ -323,7 +341,7 @@ class ResultSet(ResultBase):
         :raises KeyError: if the result is not a member.
 
         """
-        if isinstance(result, basestring):
+        if isinstance(result, string_t):
             result = AsyncResult(result)
         try:
             self.results.remove(result)
@@ -392,7 +410,7 @@ class ResultSet(ResultBase):
         :returns: the number of tasks completed.
 
         """
-        return sum(imap(int, (result.successful() for result in self.results)))
+        return sum(map(int, (result.successful() for result in self.results)))
 
     def forget(self):
         """Forget about (and possible remove the result of) all the tasks."""
@@ -421,11 +439,11 @@ class ResultSet(ResultBase):
         """
         elapsed = 0.0
         results = OrderedDict((result.id, copy(result))
-                                for result in self.results)
+                              for result in self.results)
 
         while results:
             removed = set()
-            for task_id, result in results.iteritems():
+            for task_id, result in items(results):
                 if result.ready():
                     yield result.get(timeout=timeout and timeout - elapsed,
                                      propagate=propagate)
@@ -449,7 +467,7 @@ class ResultSet(ResultBase):
 
         """
         return (self.join_native if self.supports_native_join else self.join)(
-                    timeout=timeout, propagate=propagate, interval=interval)
+            timeout=timeout, propagate=propagate, interval=interval)
 
     def join(self, timeout=None, propagate=True, interval=0.5):
         """Gathers the results of all tasks as a list in order.
@@ -527,7 +545,7 @@ class ResultSet(ResultBase):
 
         """
         results = self.results
-        acc = [None for _ in xrange(len(self))]
+        acc = [None for _ in range(len(self))]
         for task_id, meta in self.iter_native(timeout=timeout,
                                               interval=interval):
             acc[results.index(task_id)] = meta['result']

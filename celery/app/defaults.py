@@ -13,6 +13,7 @@ import sys
 from collections import deque
 from datetime import timedelta
 
+from celery.five import items
 from celery.utils import strtobool
 from celery.utils.functional import memoize
 
@@ -51,7 +52,7 @@ class Option(object):
     def __init__(self, default=None, *args, **kwargs):
         self.default = default
         self.type = kwargs.get('type') or 'string'
-        for attr, value in kwargs.iteritems():
+        for attr, value in items(kwargs):
             setattr(self, attr, value)
 
     def to_python(self, value):
@@ -69,6 +70,7 @@ NAMESPACES = {
         'CONNECTION_RETRY': Option(True, type='bool'),
         'CONNECTION_MAX_RETRIES': Option(100, type='int'),
         'HEARTBEAT': Option(10, type='int'),
+        'HEARTBEAT_CHECKRATE': Option(2.0, type='int'),
         'POOL_LIMIT': Option(10, type='int'),
         'USE_SSL': Option(False, type='bool'),
         'TRANSPORT': Option(type='string'),
@@ -133,10 +135,10 @@ NAMESPACES = {
         'STORE_ERRORS_EVEN_IF_IGNORED': Option(False, type='bool'),
         'TASK_PUBLISH_RETRY': Option(True, type='bool'),
         'TASK_PUBLISH_RETRY_POLICY': Option({
-                'max_retries': 100,
-                'interval_start': 0,
-                'interval_max': 1,
-                'interval_step': 0.2}, type='dict'),
+            'max_retries': 5,
+            'interval_start': 0,
+            'interval_max': 1,
+            'interval_step': 0.2}, type='dict'),
         'TASK_RESULT_EXPIRES': Option(timedelta(days=1), type='float'),
         'TASK_SERIALIZER': Option('pickle'),
         'TIMEZONE': Option(type='string'),
@@ -144,28 +146,31 @@ NAMESPACES = {
         'REDIRECT_STDOUTS': Option(True, type='bool'),
         'REDIRECT_STDOUTS_LEVEL': Option('WARNING'),
         'QUEUES': Option(type='dict'),
+        'QUEUE_HA_POLICY': Option(None, type='string'),
         'SECURITY_KEY': Option(type='string'),
         'SECURITY_CERTIFICATE': Option(type='string'),
         'SECURITY_CERT_STORE': Option(type='string'),
         'WORKER_DIRECT': Option(False, type='bool'),
     },
     'CELERYD': {
-        'AUTOSCALER': Option('celery.worker.autoscale.Autoscaler'),
-        'AUTORELOADER': Option('celery.worker.autoreload.Autoreloader'),
-        'BOOT_STEPS': Option((), type='tuple'),
+        'AGENT': Option(None, type='string'),
+        'AUTOSCALER': Option('celery.worker.autoscale:Autoscaler'),
+        'AUTORELOADER': Option('celery.worker.autoreload:Autoreloader'),
+        'BOOTSTEPS': Option((), type='tuple'),
+        'CONSUMER_BOOTSTEPS': Option((), type='tuple'),
         'CONCURRENCY': Option(0, type='int'),
         'TIMER': Option(type='string'),
         'TIMER_PRECISION': Option(1.0, type='float'),
         'FORCE_EXECV': Option(True, type='bool'),
         'HIJACK_ROOT_LOGGER': Option(True, type='bool'),
-        'CONSUMER': Option(type='string'),
+        'CONSUMER': Option('celery.worker.consumer:Consumer', type='string'),
         'LOG_FORMAT': Option(DEFAULT_PROCESS_LOG_FMT),
         'LOG_COLOR': Option(type='bool'),
         'LOG_LEVEL': Option('WARN', deprecate_by='2.4', remove_by='4.0',
                             alt='--loglevel argument'),
         'LOG_FILE': Option(deprecate_by='2.4', remove_by='4.0',
-                            alt='--logfile argument'),
-        'MEDIATOR': Option('celery.worker.mediator.Mediator'),
+                           alt='--logfile argument'),
+        'MEDIATOR': Option('celery.worker.mediator:Mediator'),
         'MAX_TASKS_PER_CHILD': Option(type='int'),
         'POOL': Option(DEFAULT_POOL),
         'POOL_PUTLOCKS': Option(True, type='bool'),
@@ -179,7 +184,7 @@ NAMESPACES = {
     },
     'CELERYBEAT': {
         'SCHEDULE': Option({}, type='dict'),
-        'SCHEDULER': Option('celery.beat.PersistentScheduler'),
+        'SCHEDULER': Option('celery.beat:PersistentScheduler'),
         'SCHEDULE_FILENAME': Option('celerybeat-schedule'),
         'MAX_LOOP_INTERVAL': Option(0, type='float'),
         'LOG_LEVEL': Option('INFO', deprecate_by='2.4', remove_by='4.0',
@@ -212,7 +217,7 @@ def flatten(d, ns=''):
     stack = deque([(ns, d)])
     while stack:
         name, space = stack.popleft()
-        for key, value in space.iteritems():
+        for key, value in items(space):
             if isinstance(value, dict):
                 stack.append((name + key + '_', value))
             else:
@@ -239,7 +244,7 @@ def find(name, namespace='celery'):
         return namespace, name.upper(), NAMESPACES[namespace][name.upper()]
     except KeyError:
         # - Try all the other namespaces.
-        for ns, keys in NAMESPACES.iteritems():
+        for ns, keys in items(NAMESPACES):
             if ns.upper() == name.upper():
                 return None, ns, keys
             elif isinstance(keys, dict):

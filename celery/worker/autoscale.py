@@ -7,8 +7,8 @@
     for growing and shrinking the pool according to the
     current autoscale settings.
 
-    The autoscale thread is only enabled if autoscale
-    has been enabled on the command line.
+    The autoscale thread is only enabled if :option:`--autoscale`
+    has been enabled on the command-line.
 
 """
 from __future__ import absolute_import
@@ -18,28 +18,32 @@ import threading
 from functools import partial
 from time import sleep, time
 
+from celery import bootsteps
 from celery.utils.log import get_logger
 from celery.utils.threads import bgThread
 
 from . import state
-from .bootsteps import StartStopComponent
+from .components import Pool
 from .hub import DummyLock
 
 logger = get_logger(__name__)
 debug, info, error = logger.debug, logger.info, logger.error
 
 
-class WorkerComponent(StartStopComponent):
-    name = 'worker.autoscaler'
-    requires = ('pool', )
+class WorkerComponent(bootsteps.StartStopStep):
+    label = 'Autoscaler'
+    conditional = True
+    requires = (Pool, )
 
     def __init__(self, w, **kwargs):
         self.enabled = w.autoscale
         w.autoscaler = None
 
     def create_threaded(self, w):
-        scaler = w.autoscaler = self.instantiate(w.autoscaler_cls,
-            w.pool, w.max_concurrency, w.min_concurrency)
+        scaler = w.autoscaler = self.instantiate(
+            w.autoscaler_cls,
+            w.pool, w.max_concurrency, w.min_concurrency,
+        )
         return scaler
 
     def on_poll_init(self, scaler, hub):
@@ -47,20 +51,22 @@ class WorkerComponent(StartStopComponent):
         hub.timer.apply_interval(scaler.keepalive * 1000.0, scaler.maybe_scale)
 
     def create_ev(self, w):
-        scaler = w.autoscaler = self.instantiate(w.autoscaler_cls,
+        scaler = w.autoscaler = self.instantiate(
+            w.autoscaler_cls,
             w.pool, w.max_concurrency, w.min_concurrency,
-            mutex=DummyLock())
+            mutex=DummyLock(),
+        )
         w.hub.on_init.append(partial(self.on_poll_init, scaler))
 
     def create(self, w):
         return (self.create_ev if w.use_eventloop
-                               else self.create_threaded)(w)
+                else self.create_threaded)(w)
 
 
 class Autoscaler(bgThread):
 
-    def __init__(self, pool, max_concurrency, min_concurrency=0, keepalive=30,
-            mutex=None):
+    def __init__(self, pool, max_concurrency,
+                 min_concurrency=0, keepalive=30, mutex=None):
         super(Autoscaler, self).__init__()
         self.pool = pool
         self.mutex = mutex or threading.Lock()
