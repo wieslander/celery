@@ -69,7 +69,7 @@ class Request(object):
     __slots__ = (
         'app', 'name', 'id', 'args', 'kwargs', 'on_ack', 'delivery_info',
         'hostname', 'eventer', 'connection_errors', 'task', 'eta', 'expires',
-        'request_dict', 'acknowledged', 'time_start', 'worker_pid',
+        'request_dict', 'acknowledged', 'utc', 'time_start', 'worker_pid',
         '_already_revoked', '_terminate_on_ack', '_tzlocal',
     )
 
